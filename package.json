@@ -1,0 +1,15 @@
+{
+  "name": "htg",
+  "version": "1.0.0",
+  "description": "Hexzie — HexTelegram AI bot by HexzoNetwork",
+  "main": "bot.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node bot.js",
+    "setup": "bash setup.sh",
+    "build:tools": "go build -o tools ./tools-go"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3"
+  }
+}

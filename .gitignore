@@ -1,0 +1,12 @@
+config.json
+memory.json
+models_cache.json
+node_modules/
+tools
+shots/
+tgshots/
+*.log
+.DS_Store
+/tmp/tg-*
+shot-*.png
+screenshot.png

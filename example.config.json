@@ -1,0 +1,11 @@
+{
+  "telegramToken": "PASTE_FROM_BOTFATHER",
+  "ownerUserId": 123456789,
+  "allowedUserIds": [],
+  "baseURL": "https://YOUR_PROVIDER/v1",
+  "apiKey": "sk-YOUR_KEY",
+  "model": "jmbot/mimo-v2.6-flash",
+  "systemPrompt": "You are a telegram bot that can talk to users, run shell commands, and generate images. You are helpful, creative, clever, and very sacratic",
+  "temperature": 0.7,
+  "maxTokens": 2048
+}
