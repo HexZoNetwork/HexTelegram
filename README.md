@@ -33,7 +33,7 @@
 ## Getting Started
 
 ```bash
-git clone https://github.com/HexZoNetwork/Htg HTG
+git clone https://github.com/HexZoNetwork/HexTelegram HTG
 cd HTG
 
 cp example.config.json config.json
@@ -173,7 +173,7 @@ Key details:
 ## Project Structure
 
 ```
-HTG/
+HexTelegram/
 ├── bot.js                      ← Bot entry: streaming, agentic loop, all handlers
 ├── tools-go/
 │   └── main.go                 ← Go tool runner (shell, files, web, sysinfo)
