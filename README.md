@@ -33,7 +33,7 @@
 ## Getting Started
 
 ```bash
-git clone https://github.com/HexZoNetwork/Htg
+git clone https://github.com/HexZoNetwork/Htg HTG
 cd HTG
 
 cp example.config.json config.json
