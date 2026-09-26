@@ -2,6 +2,7 @@ config.json
 memory.json
 models_cache.json
 node_modules/
+
 tools
 shots/
 tgshots/

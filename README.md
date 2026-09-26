@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>🤖 Hexzie</h1>
+  <h1>Hexzie</h1>
   <p><b>HexTelegram (HTG)</b> — AI Telegram bot by <b>HexzoNetwork</b></p>
 </div>
 
@@ -192,6 +192,22 @@ HTG/
 ## 🧪 Disclaimer
 
 > Hexzie runs shell commands with full filesystem access from `/`. Only allow people you trust (`ownerUserId` + `allowedUserIds`). HexzoNetwork is **not responsible for misuse**.
+
+Fory you that dont wan't your file get attack, add this into your config
+```
+"shell": {
+    "enabled": true,
+    "workDir": "/home",
+    "defaultTimeoutSec": 30,
+    "maxOutputChars": 8000,
+    "allowedCommands": [],
+    "blockedPatterns": [
+      "rm -rf /",
+      "mkfs",
+      ":(){:|:&};:"
+    ]
+  },
+```
 
 ---
 
