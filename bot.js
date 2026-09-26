@@ -427,26 +427,66 @@ async function runTool(name, args, ctx) {
 }
 
 
-function progressLabel(name, args) {
+const TEXT_PATH = path.join(__dirname, "text.json");
+let TEXT_BANK = { tips: [], splashes: [] };
+try { TEXT_BANK = JSON.parse(fs.readFileSync(TEXT_PATH, "utf8")); } catch { TEXT_BANK = { tips: [], splashes: [] }; }
+const pickTip = () => {
+  const tips = TEXT_BANK.tips || [];
+  const splash = TEXT_BANK.splashes || [];
+  const r = Math.random();
+  if (r < 0.25 && splash.length) return splash[Math.floor(Math.random() * splash.length)];
+  if (tips.length) return tips[Math.floor(Math.random() * tips.length)];
+  return "Ask me anything!";
+};
+function actionLabel(name, args) {
   const a = args || {};
   switch (name) {
-    case "web_check": return `🔍 Checking site ${a.url || ""}…`;
-    case "web_fetch": return `🌐 Fetching ${a.url || ""}…`;
-    case "web_screenshot": return `📸 Screenshotting ${a.url || ""}…`;
-    case "shell_exec": return `💻 Running \`${String(a.command || "").slice(0, 60)}\`…`;
-
-    case "file_read": return `📖 Reading ${a.path || ""}…`;
-    case "file_write": return `✏️ Writing ${a.path || ""}…`;
-    case "file_list": return `📁 Listing ${a.path || ""}…`;
-    case "tg_send_message": return `✉️ Sending message to ${a.chat_id || "chat"}…`;
-    case "tg_send_buttons": return `🔘 Sending message with buttons…`;
-    case "web_search": return `🔎 Searching for ${String(a.query || "").slice(0, 80)}…`;
-    case "tg_send_photo": return `🖼 Sending photo…`;
-    case "tg_send_document": return `📎 Sending file…`;
-    case "tg_get_chat": return `🔎 Looking up ${a.chat_id || ""}…`;
-    case "read_skill": return `📚 Reading skill: ${a.section || ""}…`;
-    default: return `⚙️ ${name}…`;
+    case "web_check": return `🔍 Checking site ${a.url || ""}`;
+    case "web_fetch": return `🌐 Fetching ${a.url || ""}`;
+    case "web_screenshot": return `📸 Screenshotting ${a.url || ""}`;
+    case "shell_exec": return `💻 Exec \`${String(a.command || "").slice(0, 60)}\``;
+    case "file_read": return `📖 Reading ${a.path || ""}`;
+    case "file_write": return `✏️ Writing ${a.path || ""}`;
+    case "file_list": return `📁 Listing ${a.path || ""}`;
+    case "tg_send_message": return `✉️ Sending message to ${a.chat_id || "chat"}`;
+    case "tg_send_buttons": return `🔘 Sending buttons`;
+    case "web_search": return `🔎 Searching ${String(a.query || "").slice(0, 80)}`;
+    case "tg_send_photo": return `🖼 Sending photo`;
+    case "tg_send_document": return `📎 Sending file`;
+    case "tg_get_chat": return `🔎 Looking up ${a.chat_id || ""}`;
+    case "read_skill": return `📚 Reading skill ${a.section || ""}`;
+    default: return `⚙️ ${name}`;
   }
+}
+function themeOf(text) {
+  const s = String(text || "").toLowerCase();
+  if (/site|url|http|domain|web|check/.test(s)) return "web";
+  if (/photo|image|screenshot|picture/.test(s)) return "media";
+  if (/file|read|write|list|dir|\/tmp/.test(s)) return "file";
+  if (/chat|send|group|id @|message/.test(s)) return "chat";
+  if (/shell|exec|run|ls|ping|curl|git/.test(s)) return "shell";
+  return "chat";
+}
+const THEME_STATUS = {
+  web: ["Resolving host", "Reading headers", "Scanning content", "Comparing sources"],
+  media: ["Loading preview", "Rendering pixels", "Checking resolution", "Preparing caption"],
+  file: ["Opening path", "Scanning entries", "Reading chunks", "Verifying result"],
+  chat: ["Understanding request", "Checking context", "Shaping reply", "Polishing answer"],
+  shell: ["Spawning shell", "Streaming output", "Parsing result", "Wrapping up"],
+};
+const SPIN = ["-", "\\", "|", "/"];
+const DOTS = [".", "..", "...", "!!!", "...", "..", "."];
+function customStatus(theme, tick, toolName) {
+  const pool = THEME_STATUS[theme] || THEME_STATUS.chat;
+  const spin = SPIN[tick % SPIN.length];
+  const dots = DOTS[tick % DOTS.length];
+  const idx = Math.floor(tick / 5) % pool.length;
+  return `${spin} ${pool[idx]}${dots} (${Math.floor(tick / 2)}s${toolName ? " · " + toolName : ""})`;
+}
+function renderProg(st) {
+  const spin = SPIN[st.tick % SPIN.length];
+  const dots = DOTS[st.tick % DOTS.length];
+  return `> ${spin} ${st.action}\n|-> ${st.status}${dots}\n| |-> ${st.custom}\n*Tips:* _${st.tip}_`;
 }
 
 
@@ -608,6 +648,10 @@ async function handlePrompt(chatId, userContent, ctx) {
   dbg("start:", String(typeof userContent === "string" ? userContent : "[media]").slice(0, 160));
 
   let prog = null;
+  const t0 = Date.now();
+  const theme = themeOf(typeof userContent === "string" ? userContent : "");
+  const st = { action: "💭 Thinking", status: "Reading request", custom: "", tip: pickTip(), tick: 0, tool: "" };
+  st.custom = customStatus(theme, 0, "");
   const show = async (t) => {
     if (isStale()) { dbg("skip show (stale):", String(t).slice(0, 80)); return false; }
     try {
@@ -616,7 +660,21 @@ async function handlePrompt(chatId, userContent, ctx) {
       return true;
     } catch (e) { dbg("show failed:", e.message); return false; }
   };
-  await show("💭 Thinking…");
+  const showProg = async () => {
+    const el = Math.floor((Date.now() - t0) / 1000);
+    st.custom = customStatus(theme, st.tick, st.tool || "");
+    void el;
+    return show(renderProg(st));
+  };
+  let lastEdit = 0;
+  const showProgThrottled = async () => {
+    const now = Date.now();
+    if (now - lastEdit < 1500) return;
+    lastEdit = now;
+    return showProg();
+  };
+  const liveTicker = setInterval(() => { if (isStale()) return; st.tick++; showProgThrottled().catch(() => {}); }, 500);
+  await showProg();
 
   for (let round = 0; round < maxRounds; round++) {
     if (isStale()) { dbg(`abort at round ${round} (superseded)`); break; }
@@ -647,6 +705,7 @@ async function handlePrompt(chatId, userContent, ctx) {
       if (lastErr || isStale()) {
         if (isStale()) break;
         dbg("all retries failed:", String(lastErr.message || lastErr).slice(0, 200));
+        clearInterval(liveTicker);
         await show(`❌ ${providerDown ? "AI provider is down (502 Bad Gateway from host). Try again in a few minutes." : "Request failed: " + String(lastErr.message || lastErr).slice(0, 250)}`);
 
         return;
@@ -662,24 +721,34 @@ async function handlePrompt(chatId, userContent, ctx) {
         let args = {};
         try { args = JSON.parse(tc.function?.arguments || "{}"); } catch {}
         dbg("tool start:", tname, JSON.stringify(args).slice(0, 160));
-        await show(progressLabel(tname, args));
+        st.action = actionLabel(tname, args);
+        st.status = "Running tool";
+        st.tool = tname;
+        await showProg();
         const result = await runTool(tname, args, ctx);
         dbg("tool done:", tname, String(result).slice(0, 160));
         if (isStale()) break;
         const ok = !/^(TG ERROR|TOOL ERROR|ERROR|BLOCKED|IMAGE FAILED)/.test(String(result));
-        await show(`${ok ? "✅" : "⚠️"} ${tname} ${ok ? "done" : "failed"} — continuing…`);
+        st.action = `${ok ? "✅" : "⚠️"} ${tname} ${ok ? "done" : "failed"}`;
+        st.status = "Reviewing result";
+        await showProg();
         messages.push({ role: "tool", tool_call_id: tc.id, name: tname, content: String(result).slice(0, 8000) });
       }
       if (isStale()) { dbg("abort after tools (superseded)"); break; }
-      await show("💭 Thinking…");
+      st.action = "💭 Thinking";
+      st.status = "Composing answer";
+      st.tool = "";
+      await showProg();
       continue;
     }
     const answer = (r.content || "").trim() || "(empty reply)";
     dbg("final answer len:", answer.length);
     pushHistory(chatId, "assistant", answer);
+    clearInterval(liveTicker);
     await finalizeStream(ctx, prog, answer);
     return;
   }
+  clearInterval(liveTicker);
   if (isStale()) {
 
     if (prog) { try { await safeEdit(ctx, prog.chat.id, prog.message_id, "⏭ Skipped — answering your newer message…"); } catch {} }
