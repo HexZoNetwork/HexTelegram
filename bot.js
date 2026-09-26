@@ -138,7 +138,7 @@ bot.use((ctx, next) => {
 });
 
 
-async function chatStream(messages, tools, onContent, signal, useStream = true) {
+async function chatStream(messages, tools, onContent, signal, useStream = true, onThought) {
   const body = {
     model: config.model,
     messages,
@@ -224,6 +224,7 @@ async function chatStream(messages, tools, onContent, signal, useStream = true) 
       id: t.id || `call_${i}`, type: "function",
       function: { name: t.function?.name || "", arguments: t.function?.arguments || "{}" },
     }));
+    if (msg.reasoning_content && onThought) { try { onThought(String(msg.reasoning_content)); } catch {} }
     if (config.debugLog) console.log(`[api] non-stream done in ${Date.now() - t0}ms len=${(msg.content || "").length} tools=${tc.length}`);
     return { content: msg.content || "", toolCalls: tc, finishReason: j.choices?.[0]?.finish_reason || null, aborted: false };
   }
@@ -232,6 +233,7 @@ async function chatStream(messages, tools, onContent, signal, useStream = true) 
   const dec = new TextDecoder();
   let buf = "";
   let content = "";
+  let reasoning = "";
   const toolByIndex = new Map();
   let finishReason = null;
 
@@ -253,6 +255,10 @@ async function chatStream(messages, tools, onContent, signal, useStream = true) 
       if (typeof d.content === "string" && d.content) {
         content += d.content;
         if (onContent) { try { onContent(content); } catch {} }
+      }
+      if (typeof d.reasoning_content === "string" && d.reasoning_content) {
+        reasoning += d.reasoning_content;
+        if (onThought) { try { onThought(reasoning); } catch {} }
       }
       for (const tc of d.tool_calls || []) {
         const i = tc.index ?? 0;
@@ -476,17 +482,26 @@ const THEME_STATUS = {
 };
 const SPIN = ["-", "\\", "|", "/"];
 const DOTS = [".", "..", "...", "!!!", "...", "..", "."];
-function customStatus(theme, tick, toolName) {
+function customStatus(theme, elapsedSec, toolName) {
   const pool = THEME_STATUS[theme] || THEME_STATUS.chat;
-  const spin = SPIN[tick % SPIN.length];
-  const dots = DOTS[tick % DOTS.length];
-  const idx = Math.floor(tick / 5) % pool.length;
-  return `${spin} ${pool[idx]}${dots} (${Math.floor(tick / 2)}s${toolName ? " · " + toolName : ""})`;
+  const idx = Math.floor(elapsedSec / 5) % pool.length;
+  return `- ${pool[idx]}.${toolName ? " · " + toolName : ""}`;
 }
 function renderProg(st) {
-  const spin = SPIN[st.tick % SPIN.length];
-  const dots = DOTS[st.tick % DOTS.length];
-  return `> ${spin} ${st.action}\n|-> ${st.status}${dots}\n| |-> ${st.custom}\n*Tips:* _${st.tip}_`;
+  return `> - ${st.action}\n|-> ${st.status}.\n| |-> ${st.custom}\nTips: ${st.tip}`;
+}
+function thoughtSnippet(raw) {
+  const s = String(raw || "").replace(/\s+/g, " ").trim();
+  if (s.length < 12) return "";
+  const parts = s.slice(-240).split(/(?<=[.!?])\s+/);
+  let i = parts.length - 1;
+  let out = parts[i];
+  while (out.trim().length < 12 && i > 0) out = parts[--i];
+  out = out.trim().replace(/^[\s\-–—:;,."']+/, "");
+  if (!out) return "";
+  if (out.length > 92) out = "…" + out.slice(-90);
+  if (!/[.!?…]$/.test(out)) out += ".";
+  return out;
 }
 
 
@@ -650,8 +665,10 @@ async function handlePrompt(chatId, userContent, ctx) {
   let prog = null;
   const t0 = Date.now();
   const theme = themeOf(typeof userContent === "string" ? userContent : "");
-  const st = { action: "💭 Thinking", status: "Reading request", custom: "", tip: pickTip(), tick: 0, tool: "" };
+  const st = { action: "💭 Thinking", status: "Reading request", custom: "", tip: pickTip(), tool: "" };
   st.custom = customStatus(theme, 0, "");
+  let liveThought = "";
+  const noteThought = (t) => { liveThought = String(t || ""); };
   const show = async (t) => {
     if (isStale()) { dbg("skip show (stale):", String(t).slice(0, 80)); return false; }
     try {
@@ -662,25 +679,22 @@ async function handlePrompt(chatId, userContent, ctx) {
   };
   const showProg = async () => {
     const el = Math.floor((Date.now() - t0) / 1000);
-    st.custom = customStatus(theme, st.tick, st.tool || "");
-    void el;
+    const snip = thoughtSnippet(liveThought);
+    st.custom = snip ? `- ${snip}` : customStatus(theme, el, st.tool || "");
     return show(renderProg(st));
   };
-  let lastEdit = 0;
-  const showProgThrottled = async () => {
-    const now = Date.now();
-    if (now - lastEdit < 1500) return;
-    lastEdit = now;
-    return showProg();
-  };
-  const liveTicker = setInterval(() => { if (isStale()) return; st.tick++; showProgThrottled().catch(() => {}); }, 500);
+  const liveTicker = setInterval(() => {
+    if (isStale()) return;
+    st.tip = pickTip();
+    showProg().catch(() => {});
+  }, 5000);
   await showProg();
 
   for (let round = 0; round < maxRounds; round++) {
     if (isStale()) { dbg(`abort at round ${round} (superseded)`); break; }
     let r;
     try {
-      r = await chatStream(messages, TOOL_DEFS, null);
+      r = await chatStream(messages, TOOL_DEFS, null, undefined, true, noteThought);
     } catch (e) {
       if (isStale()) { dbg("abort on error path (stale)"); break; }
       const msg1 = String(e.message || e);
@@ -697,7 +711,7 @@ async function handlePrompt(chatId, userContent, ctx) {
           if (isStale()) break;
         }
         try {
-          r = await chatStream(messages, TOOL_DEFS, null, undefined, useStream);
+          r = await chatStream(messages, TOOL_DEFS, null, undefined, useStream, noteThought);
           lastErr = null;
           break;
         } catch (e2) { lastErr = e2; dbg(`retry ${ri} failed:`, String(e2.message || e2).slice(0, 160)); }
