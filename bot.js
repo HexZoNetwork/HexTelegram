@@ -24,7 +24,7 @@ const SKILLS_PATH = path.join(__dirname, "SKILLS.md");
 let SKILLS_BOOK = "";
 try { SKILLS_BOOK = fs.readFileSync(SKILLS_PATH, "utf8"); } catch { SKILLS_BOOK = ""; }
 const SHORT_PROMPT =
-  "You are Hexzie, the HexTelegram AI assistant by HexzoNetwork. Tools: shell_exec, file_read/write/list, get_time, calc, web_search/fetch/check/screenshot, sysinfo, tg_* (send/buttons/photo/doc/edit/delete/forward/action/get_chat/pin). " +
+  "You are Hexzie, the HexTelegram AI assistant by HexzoNetwork. Tools: shell_exec, file_read/write/list, get_time, calc, web_search/fetch/check/screenshot, sysinfo, tg_* (send/buttons/photo/doc/audio/video/sticker/poll/dice/location/venue/contact/mediagroup/copy/edit/delete/forward/action/get_chat/admins/member/ban/unban/restrict/promote/invite/pin/react) + tg_exec (UNIVERSAL code-drop: raw Telegraf JS with telegram/chat_id/me/reply helpers — use when NO tg_* tool fits) " +
   "Rules: (0) 'find/search/article/who is X' -> web_search FIRST, then web_fetch best hits. NEVER web_check google/duckduckgo search URLs. " +
   "(1) 'check site <url>' -> web_check first, then web_fetch/screenshot. " +
   "(2) 'chat/send id <n>' -> tg_get_chat verify, then tg_send_message; on TG ERROR warn plainly (blocked / never pressed START / no rights / flood-wait) — never claim success on error. " +
@@ -327,8 +327,47 @@ const TOOL_DEFS = [
   { type: "function", function: { name: "tg_forward", description: "Forward a message to another chat.", parameters: { type: "object", properties: { to_chat_id: { type: "string" }, from_chat_id: { type: "string" }, message_id: { type: "number" } }, required: ["to_chat_id", "message_id"] } } },
   { type: "function", function: { name: "tg_chat_action", description: "Send chat action (typing, upload_photo, ...).", parameters: { type: "object", properties: { chat_id: { type: "string" }, action: { type: "string" } } } } },
   { type: "function", function: { name: "tg_get_chat", description: "Get info about a chat/user/channel.", parameters: { type: "object", properties: { chat_id: { type: "string" } } } } },
-  { type: "function", function: { name: "tg_pin", description: "Pin a message.", parameters: { type: "object", properties: { chat_id: { type: "string" }, message_id: { type: "number" } }, required: ["message_id"] } } },
+  { type: "function", function: { name: "tg_pin", description: "Pin a message.", parameters: { type: "object", properties: { chat_id: { type: "string" }, message_id: { type: "number" }, disable_notification: { type: "boolean" } }, required: ["message_id"] } } },
   { type: "function", function: { name: "tg_unpin", description: "Unpin a message (or all if no id).", parameters: { type: "object", properties: { chat_id: { type: "string" }, message_id: { type: "number" } } } } },
+  { type: "function", function: { name: "tg_send_audio", description: "Send an audio/music file (URL, file_id, or local path).", parameters: { type: "object", properties: { chat_id: { type: "string" }, audio: { type: "string" }, caption: { type: "string" }, title: { type: "string" }, performer: { type: "string" } }, required: ["audio"] } } },
+  { type: "function", function: { name: "tg_send_video", description: "Send a video (URL, file_id, or local path).", parameters: { type: "object", properties: { chat_id: { type: "string" }, video: { type: "string" }, caption: { type: "string" } }, required: ["video"] } } },
+  { type: "function", function: { name: "tg_send_voice", description: "Send a voice message (ogg/opus URL, file_id, or local path).", parameters: { type: "object", properties: { chat_id: { type: "string" }, voice: { type: "string" }, caption: { type: "string" } }, required: ["voice"] } } },
+  { type: "function", function: { name: "tg_send_animation", description: "Send a GIF animation (URL, file_id, or local path).", parameters: { type: "object", properties: { chat_id: { type: "string" }, animation: { type: "string" }, caption: { type: "string" } }, required: ["animation"] } } },
+  { type: "function", function: { name: "tg_send_sticker", description: "Send a sticker (file_id or HTTPS URL for webp/tgs/webm).", parameters: { type: "object", properties: { chat_id: { type: "string" }, sticker: { type: "string" } }, required: ["sticker"] } } },
+  { type: "function", function: { name: "tg_send_location", description: "Send a map location.", parameters: { type: "object", properties: { chat_id: { type: "string" }, latitude: { type: "number" }, longitude: { type: "number" } }, required: ["latitude", "longitude"] } } },
+  { type: "function", function: { name: "tg_send_venue", description: "Send a venue (location + name + address).", parameters: { type: "object", properties: { chat_id: { type: "string" }, latitude: { type: "number" }, longitude: { type: "number" }, title: { type: "string" }, address: { type: "string" } }, required: ["latitude", "longitude", "title", "address"] } } },
+  { type: "function", function: { name: "tg_send_contact", description: "Send a contact card.", parameters: { type: "object", properties: { chat_id: { type: "string" }, phone_number: { type: "string" }, first_name: { type: "string" }, last_name: { type: "string" } }, required: ["phone_number", "first_name"] } } },
+  { type: "function", function: { name: "tg_send_dice", description: "Send a dice/animation. Optional emoji: 🎲 🏀 ⚽ 🎰 🎳 🏏 🎯.", parameters: { type: "object", properties: { chat_id: { type: "string" }, emoji: { type: "string" } } } } },
+  { type: "function", function: { name: "tg_send_poll", description: "Send a poll/quiz. options = array of 2-10 strings.", parameters: { type: "object", properties: { chat_id: { type: "string" }, question: { type: "string" }, options: { type: "array", items: { type: "string" } }, is_anonymous: { type: "boolean" }, type: { type: "string" }, correct_option_id: { type: "number" } }, required: ["question", "options"] } } },
+  { type: "function", function: { name: "tg_send_media_group", description: "Send an album of 2-10 photos/videos (media = [{type:'photo'|'video', media:'URL|file_id|local path', caption?}]).", parameters: { type: "object", properties: { chat_id: { type: "string" }, media: { type: "array", items: { type: "object" } } }, required: ["media"] } } },
+  { type: "function", function: { name: "tg_copy_message", description: "Copy a message without forward header (no link to original).", parameters: { type: "object", properties: { to_chat_id: { type: "string" }, from_chat_id: { type: "string" }, message_id: { type: "number" }, caption: { type: "string" } }, required: ["to_chat_id", "message_id"] } } },
+  { type: "function", function: { name: "tg_edit_caption", description: "Edit a media message caption.", parameters: { type: "object", properties: { chat_id: { type: "string" }, message_id: { type: "number" }, caption: { type: "string" } }, required: ["message_id", "caption"] } } },
+  { type: "function", function: { name: "tg_edit_buttons", description: "Edit only the inline buttons of a message. buttons = rows of {text, callback_data?, url?}; empty array removes keyboard.", parameters: { type: "object", properties: { chat_id: { type: "string" }, message_id: { type: "number" }, buttons: { type: "array" } }, required: ["message_id", "buttons"] } } },
+  { type: "function", function: { name: "tg_delete_messages", description: "Delete up to 100 messages at once (message_ids array).", parameters: { type: "object", properties: { chat_id: { type: "string" }, message_ids: { type: "array", items: { type: "number" } } }, required: ["message_ids"] } } },
+  { type: "function", function: { name: "tg_get_chat_member", description: "Get info about one member of a chat (status: member/admin/kicked/...).", parameters: { type: "object", properties: { chat_id: { type: "string" }, user_id: { type: "number" } }, required: ["user_id"] } } },
+  { type: "function", function: { name: "tg_get_admins", description: "List chat administrators.", parameters: { type: "object", properties: { chat_id: { type: "string" } } } } },
+  { type: "function", function: { name: "tg_get_member_count", description: "Get number of members in a chat.", parameters: { type: "object", properties: { chat_id: { type: "string" } } } } },
+  { type: "function", function: { name: "tg_get_user_photos", description: "Get a user's profile photos (returns count + file_ids).", parameters: { type: "object", properties: { user_id: { type: "number" }, limit: { type: "number" } }, required: ["user_id"] } } },
+  { type: "function", function: { name: "tg_ban", description: "Ban/kick a user (bot must be admin). Optional until_date (unix time).", parameters: { type: "object", properties: { chat_id: { type: "string" }, user_id: { type: "number" }, until_date: { type: "number" } }, required: ["user_id"] } } },
+  { type: "function", function: { name: "tg_unban", description: "Unban a user.", parameters: { type: "object", properties: { chat_id: { type: "string" }, user_id: { type: "number" } }, required: ["user_id"] } } },
+  { type: "function", function: { name: "tg_restrict", description: "Restrict/unrestrict a member. permissions = {can_send_messages?, can_send_media_messages?, can_send_polls?, can_invite_users?, can_pin_messages?}. Omit = unrestrict all.", parameters: { type: "object", properties: { chat_id: { type: "string" }, user_id: { type: "number" }, permissions: { type: "object" }, until_date: { type: "number" } }, required: ["user_id", "permissions"] } } },
+  { type: "function", function: { name: "tg_promote", description: "Promote/demote a member. rights = {can_post_messages?, can_edit_messages?, can_delete_messages?, can_invite_users?, can_pin_messages?, can_manage_chat?}. All false = demote.", parameters: { type: "object", properties: { chat_id: { type: "string" }, user_id: { type: "number" }, rights: { type: "object" } }, required: ["user_id"] } } },
+  { type: "function", function: { name: "tg_invite_link", description: "Create (or export existing) invite link for a chat. Bot must be admin with invite rights.", parameters: { type: "object", properties: { chat_id: { type: "string" }, name: { type: "string" }, expire_minutes: { type: "number" }, member_limit: { type: "number" } } } } },
+  { type: "function", function: { name: "tg_leave", description: "Make the bot leave a group/supergroup/channel.", parameters: { type: "object", properties: { chat_id: { type: "string" } } } } },
+  { type: "function", function: { name: "tg_answer_callback", description: "Answer an inline button press (callback_query_id from button event, or any text to show).", parameters: { type: "object", properties: { callback_query_id: { type: "string" }, text: { type: "string" }, show_alert: { type: "boolean" } }, required: ["callback_query_id"] } } },
+  { type: "function", function: { name: "tg_react", description: "React to a message with emoji (e.g. ❤️ 👍 🔥). Empty array removes reactions. Bot needs rights in channel.", parameters: { type: "object", properties: { chat_id: { type: "string" }, message_id: { type: "number" }, emoji: { type: "string" } }, required: ["message_id"] } } },
+  { type: "function", function: { name: "tg_stop_poll", description: "Stop a poll, show final results.", parameters: { type: "object", properties: { chat_id: { type: "string" }, message_id: { type: "number" } }, required: ["message_id"] } } },
+  { type: "function", function: { name: "tg_set_title", description: "Change a group/supergroup/channel title (bot must be admin).", parameters: { type: "object", properties: { chat_id: { type: "string" }, title: { type: "string" } }, required: ["title"] } } },
+  { type: "function", function: { name: "tg_set_description", description: "Change a group/supergroup/channel description (bot must be admin).", parameters: { type: "object", properties: { chat_id: { type: "string" }, description: { type: "string" } }, required: ["description"] } } },
+  { type: "function", function: { name: "tg_approve_join", description: "Approve a chat join request (bot must be admin with invite rights).", parameters: { type: "object", properties: { chat_id: { type: "string" }, user_id: { type: "number" } }, required: ["user_id"] } } },
+  { type: "function", function: { name: "tg_decline_join", description: "Decline a chat join request.", parameters: { type: "object", properties: { chat_id: { type: "string" }, user_id: { type: "number" } }, required: ["user_id"] } } },
+  { type: "function", function: { name: "tg_unpin_all", description: "Unpin ALL pinned messages in a chat.", parameters: { type: "object", properties: { chat_id: { type: "string" } } } } },
+  { type: "function", function: { name: "tg_get_file", description: "Get a download link for a file (by file_id).", parameters: { type: "object", properties: { file_id: { type: "string" } }, required: ["file_id"] } } },
+  { type: "function", function: { name: "tg_say_and_pin", description: "CUSTOM composite: send a message and pin it in one call.", parameters: { type: "object", properties: { chat_id: { type: "string" }, text: { type: "string" }, disable_notification: { type: "boolean" } }, required: ["text"] } } },
+  { type: "function", function: { name: "tg_broadcast", description: "CUSTOM composite: send the same text to multiple chat_ids (array of ids/usernames). Returns per-chat results.", parameters: { type: "object", properties: { chat_ids: { type: "array", items: { type: "string" } }, text: { type: "string" } }, required: ["chat_ids", "text"] } } },
+  { type: "function", function: { name: "tg_user_info", description: "CUSTOM composite: full dossier on a user in a chat - profile plus membership plus photo count, one call.", parameters: { type: "object", properties: { chat_id: { type: "string" }, user_id: { type: "number" } }, required: ["user_id"] } } },
+  { type: "function", function: { name: "tg_api", description: "UNIVERSAL fallback - call ANY api.telegram.org Bot API method directly via Telegraf callApi when no dedicated tg_* tool exists. method = snake_case Bot API method (e.g. stopPoll, setChatTitle, approveChatJoinRequest, sendGame, editMessageLiveLocation, setMyCommands). params = raw JSON object for that method (chat_id defaults to current chat). Prefer a dedicated tg_* tool when one exists.", parameters: { type: "object", properties: { method: { type: "string" }, params: { type: "object" } }, required: ["method"] } } },
+  { type: "function", function: { name: "tg_exec", description: "UNIVERSAL Telegraf code-drop: run raw JavaScript against the live Telegraf client when no dedicated tg_* tool fits. You get: telegram (full bot.telegram client — sendMessage, sendPhoto, pinChatMessage, banChatMember, callApi, ANYTHING Telegraf can do), chat_id (current chat), me (sender/chat/message ids), reply (async fn to reply in current chat). Write async JS, use await, end with return. Examples: await telegram.sendMessage(chat_id, 'hi'); return 'sent' | await telegram.pinChatMessage(chat_id, 123); return 'pinned' | const r = await telegram.callApi('stopPoll', {chat_id, message_id: 5}); return JSON.stringify(r). No require/process/fs/loops.", parameters: { type: "object", properties: { code: { type: "string", description: "Async JS body. Helpers: telegram, chat_id, me {chat,user,message_id,thread_id}, reply(text). Must return a value." } }, required: ["code"] } } },
   { type: "function", function: { name: "read_skill", description: "Read one SKILLS.md section for how-to. ALWAYS call before unfamiliar jobs. Sections: sites, recon, messaging, telegram-api, style, access, tools.", parameters: { type: "object", properties: { section: { type: "string", description: "e.g. sites, messaging" } }, required: ["section"] } } },
 ];
 
@@ -405,11 +444,208 @@ async function runTool(name, args, ctx) {
         return JSON.stringify(c).slice(0, 2000);
       }
       case "tg_pin":
-        await bot.telegram.pinChatMessage(chatId(args.chat_id), args.message_id);
+        await bot.telegram.pinChatMessage(chatId(args.chat_id), args.message_id, args.disable_notification ? { disable_notification: true } : undefined);
         return "pinned ok";
       case "tg_unpin":
         await bot.telegram.unpinChatMessage(chatId(args.chat_id), args.message_id);
         return "unpinned ok";
+      case "tg_send_audio": case "tg_send_video": case "tg_send_voice": case "tg_send_animation": {
+        const kind = { tg_send_audio: "Audio", tg_send_video: "Video", tg_send_voice: "Voice", tg_send_animation: "Animation" }[name];
+        const key = { tg_send_audio: "audio", tg_send_video: "video", tg_send_voice: "voice", tg_send_animation: "animation" }[name];
+        let src = args[key];
+        try { if (src && fs.existsSync(String(src)) && fs.statSync(String(src)).isFile()) src = { source: String(src) }; } catch {}
+        const extra = {};
+        if (args.caption) extra.caption = String(args.caption).slice(0, 1000);
+        if (name === "tg_send_audio") { if (args.title) extra.title = args.title; if (args.performer) extra.performer = args.performer; }
+        const m = await bot.telegram[`send${kind}`](chatId(args.chat_id), src, extra);
+        return `sent ${key} message_id=${m.message_id}`;
+      }
+      case "tg_send_sticker": {
+        const m = await bot.telegram.sendSticker(chatId(args.chat_id), args.sticker);
+        return `sent sticker message_id=${m.message_id}`;
+      }
+      case "tg_send_location": {
+        const m = await bot.telegram.sendLocation(chatId(args.chat_id), args.latitude, args.longitude);
+        return `sent location message_id=${m.message_id}`;
+      }
+      case "tg_send_venue": {
+        const m = await bot.telegram.sendVenue(chatId(args.chat_id), args.latitude, args.longitude, args.title, args.address);
+        return `sent venue message_id=${m.message_id}`;
+      }
+      case "tg_send_contact": {
+        const m = await bot.telegram.sendContact(chatId(args.chat_id), args.phone_number, args.first_name, { last_name: args.last_name });
+        return `sent contact message_id=${m.message_id}`;
+      }
+      case "tg_send_dice": {
+        const m = await bot.telegram.sendDice(chatId(args.chat_id), args.emoji ? { emoji: args.emoji } : undefined);
+        return `sent dice value=${m.dice?.value} message_id=${m.message_id}`;
+      }
+      case "tg_send_poll": {
+        const m = await bot.telegram.sendPoll(chatId(args.chat_id), args.question, args.options || [],
+          { is_anonymous: args.is_anonymous ?? true, type: args.type || "regular", correct_option_id: args.correct_option_id });
+        return `sent poll message_id=${m.message_id}`;
+      }
+      case "tg_send_media_group": {
+        const media = (args.media || []).slice(0, 10).map((it) => {
+          let src = it.media;
+          try { if (src && fs.existsSync(String(src)) && fs.statSync(String(src)).isFile()) src = { source: String(src) }; } catch {}
+          return { type: it.type === "video" ? "video" : "photo", media: src, ...(it.caption ? { caption: String(it.caption).slice(0, 1000) } : {}) };
+        });
+        const ms = await bot.telegram.sendMediaGroup(chatId(args.chat_id), media);
+        return `sent media_group ${(ms || []).map((m) => m.message_id).join(",")}`;
+      }
+      case "tg_copy_message": {
+        const m = await bot.telegram.copyMessage(chatId(args.to_chat_id), chatId(args.from_chat_id), args.message_id,
+          args.caption ? { caption: args.caption } : undefined);
+        return `copied message_id=${m.message_id}`;
+      }
+      case "tg_edit_caption":
+        await bot.telegram.editMessageCaption(chatId(args.chat_id), args.message_id, undefined, args.caption);
+        return "caption edited ok";
+      case "tg_edit_buttons": {
+        const rows = (args.buttons || []).map((row) =>
+          (Array.isArray(row) ? row : [row]).map((b) => {
+            if (b.url) return { text: String(b.text || "link").slice(0, 64), url: String(b.url) };
+            return { text: String(b.text || "?").slice(0, 64), callback_data: String(b.callback_data || b.text || "?").slice(0, 64) };
+          })
+        );
+        await bot.telegram.editMessageReplyMarkup(chatId(args.chat_id), args.message_id, undefined, { inline_keyboard: rows });
+        return `edited buttons (${rows.flat().length}) ok`;
+      }
+      case "tg_delete_messages":
+        await bot.telegram.deleteMessages(chatId(args.chat_id), args.message_ids);
+        return `deleted ${(args.message_ids || []).length} ok`;
+      case "tg_get_chat_member": {
+        const m = await bot.telegram.getChatMember(chatId(args.chat_id), args.user_id);
+        return JSON.stringify(m).slice(0, 2000);
+      }
+      case "tg_get_admins": {
+        const a = await bot.telegram.getChatAdministrators(chatId(args.chat_id));
+        return JSON.stringify(a.map((x) => ({ user: x.user?.id, username: x.user?.username, status: x.status }))).slice(0, 2000);
+      }
+      case "tg_get_member_count": {
+        const n = await bot.telegram.getChatMembersCount(chatId(args.chat_id));
+        return `member_count=${n}`;
+      }
+      case "tg_get_user_photos": {
+        const p = await bot.telegram.getUserProfilePhotos(args.user_id, 0, args.limit || 3);
+        const ids = (p.photos || []).map((set) => set[set.length - 1]?.file_id).filter(Boolean);
+        return `total=${p.total_count} file_ids=${ids.join(",") || "(none)"}`;
+      }
+      case "tg_ban":
+        await bot.telegram.banChatMember(chatId(args.chat_id), args.user_id, args.until_date);
+        return "banned ok";
+      case "tg_unban":
+        await bot.telegram.unbanChatMember(chatId(args.chat_id), args.user_id);
+        return "unbanned ok";
+      case "tg_restrict":
+        await bot.telegram.restrictChatMember(chatId(args.chat_id), args.user_id, { ...(args.permissions || {}), ...(args.until_date ? { until_date: args.until_date } : {}) });
+        return "restricted ok";
+      case "tg_promote":
+        await bot.telegram.promoteChatMember(chatId(args.chat_id), args.user_id, { ...(args.rights || {}) });
+        return "promote/demote ok";
+      case "tg_invite_link": {
+        const extra = {};
+        if (args.name) extra.name = args.name;
+        if (args.expire_minutes) extra.expire_date = Math.floor(Date.now() / 1000) + args.expire_minutes * 60;
+        if (args.member_limit) extra.member_limit = args.member_limit;
+        const link = await bot.telegram.createChatInviteLink(chatId(args.chat_id), extra);
+        return `invite=${link.invite_link}`;
+      }
+      case "tg_leave":
+        await bot.telegram.leaveChat(chatId(args.chat_id));
+        return "left chat ok";
+      case "tg_answer_callback":
+        await bot.telegram.answerCbQuery(args.callback_query_id, args.text || "", { show_alert: !!args.show_alert });
+        return "callback answered ok";
+      case "tg_react":
+        await bot.telegram.callApi("setMessageReaction", {
+          chat_id: chatId(args.chat_id), message_id: args.message_id,
+          reaction: args.emoji ? [{ type: "emoji", emoji: args.emoji }] : [],
+        });
+        return "reaction set ok";
+      case "tg_stop_poll": {
+        const p = await bot.telegram.stopPoll(chatId(args.chat_id), args.message_id);
+        const total = (p.options || []).reduce((s, o) => s + (o.voter_count || 0), 0);
+        return `poll stopped total_votes=${total} options=${(p.options || []).map((o) => `${o.text}:${o.voter_count}`).join("|")}`.slice(0, 2000);
+      }
+      case "tg_set_title":
+        await bot.telegram.setChatTitle(chatId(args.chat_id), args.title);
+        return "title set ok";
+      case "tg_set_description":
+        await bot.telegram.setChatDescription(chatId(args.chat_id), args.description);
+        return "description set ok";
+      case "tg_approve_join":
+        await bot.telegram.approveChatJoinRequest(chatId(args.chat_id), args.user_id);
+        return "join approved ok";
+      case "tg_decline_join":
+        await bot.telegram.declineChatJoinRequest(chatId(args.chat_id), args.user_id);
+        return "join declined ok";
+      case "tg_unpin_all":
+        await bot.telegram.unpinAllChatMessages(chatId(args.chat_id));
+        return "all unpinned ok";
+      case "tg_get_file": {
+        const link = await bot.telegram.getFileLink(args.file_id);
+        return `file_link=${link}`;
+      }
+      case "tg_say_and_pin": {
+        const m = await bot.telegram.sendMessage(chatId(args.chat_id), String(args.text).slice(0, 4000));
+        try {
+          await bot.telegram.pinChatMessage(chatId(args.chat_id), m.message_id,
+            args.disable_notification ? { disable_notification: true } : undefined);
+          return `sent+ pinned message_id=${m.message_id}`;
+        } catch (e) { return `sent message_id=${m.message_id} BUT pin failed: ${e.message}`; }
+      }
+      case "tg_broadcast": {
+        const outs = [];
+        for (const id of (args.chat_ids || []).slice(0, 20)) {
+          try {
+            const m = await bot.telegram.sendMessage(String(id), String(args.text).slice(0, 4000));
+            outs.push(`${id}:ok#${m.message_id}`);
+          } catch (e) { outs.push(`${id}:FAIL ${e.message}`.slice(0, 160)); }
+        }
+        return `broadcast ${outs.length} chats\n` + outs.join("\n").slice(0, 2000);
+      }
+      case "tg_user_info": {
+        const cid = chatId(args.chat_id);
+        const parts = [];
+        try { const u = await bot.telegram.getChat(args.user_id); parts.push(`profile:${u.first_name || ""} @${u.username || "?"} bio=${(u.bio || "-").slice(0, 120)}`); }
+        catch (e) { parts.push(`profile:FAIL ${e.message}`.slice(0, 120)); }
+        try { const m = await bot.telegram.getChatMember(cid, args.user_id); parts.push(`member:status=${m.status}${m.custom_title ? ` title=${m.custom_title}` : ""}`); }
+        catch (e) { parts.push(`member:FAIL ${e.message}`.slice(0, 120)); }
+        try { const p = await bot.telegram.getUserProfilePhotos(args.user_id, 0, 1); parts.push(`photos:total=${p.total_count}`); }
+        catch (e) { parts.push("photos:?"); }
+        return parts.join(" | ").slice(0, 2000);
+      }
+      case "tg_api": {
+        const method = String(args.method || "").trim();
+        if (!/^\w+$/.test(method)) return "ERROR: bad method name (snake_case, e.g. stopPoll)";
+        if (["deleteWebhook", "setWebhook", "logOut", "close"].includes(method))
+          return `BLOCKED: '${method}' would break the bot (webhook/logout) — refused`;
+        const params = { ...(args.params || {}) };
+        if (!params.chat_id && /chat|message|poll|topic|invite|member|sticker|forum/i.test(method)) params.chat_id = curChat;
+        const res = await bot.telegram.callApi(method, params);
+        return `tg_api ${method} OK: ${JSON.stringify(res).slice(0, 2000)}`;
+      }
+      case "tg_exec": {
+        let code = String(args.code || "").trim();
+        if (!code) return "ERROR: empty code — drop Telegraf JS like: await telegram.sendMessage(chat_id, 'hi'); return 'sent'";
+        if (code.length > 4000) return "ERROR: code too long (max 4000 chars) — split into smaller steps";
+        if (/\brequire\b|\bprocess\b|\bglobal\b|\bBuffer\b|\bfs\b|child_process|\bexec\b|\bspawn\b|\beval\b|\bFunction\b|constructor|__proto__|prototype\s*\[|while\s*\(\s*true|for\s*\(\s*;\s*;/.test(code))
+          return "BLOCKED: code uses forbidden pattern (require/process/fs/exec/eval/infinite loop) — use telegram/chat_id/reply helpers only";
+        const me = { chat: String(ctx.chat?.id ?? ""), user: ctx.from?.id, message_id: ctx.message?.message_id, thread_id: ctx.message?.message_thread_id };
+        const reply = async (text) => { await bot.telegram.sendMessage(chatId(args.chat_id), String(text).slice(0, 4000)); return "replied"; };
+        try {
+          const fn = new Function("telegram", "chat_id", "me", "reply", "ctx",
+            `"use strict"; return (async () => {\n${code}\n})();`);
+          const res = await Promise.race([
+            fn(bot.telegram, curChat, me, reply, ctx),
+            new Promise((_, rej) => setTimeout(() => rej(new Error("tg_exec timeout after 25s")), 25000)),
+          ]);
+          if (res === undefined) return "tg_exec OK (no return value)";
+          return `tg_exec OK: ${JSON.stringify(res)?.slice(0, 2000) ?? String(res).slice(0, 2000)}`;
+        } catch (e) { return `TG_EXEC ERROR: ${e.message}`.slice(0, 2000); }
+      }
       case "read_skill":
         return readSkill(args.section);
     }
@@ -460,6 +696,22 @@ function actionLabel(name, args) {
     case "tg_send_photo": return `🖼 Sending photo`;
     case "tg_send_document": return `📎 Sending file`;
     case "tg_get_chat": return `🔎 Looking up ${a.chat_id || ""}`;
+    case "tg_get_chat_member": return `👤 Member info ${a.user_id || ""}`;
+    case "tg_get_admins": return `👑 Listing admins`;
+    case "tg_ban": return `🔨 Banning ${a.user_id || ""}`;
+    case "tg_send_poll": return `📊 Sending poll`;
+    case "tg_send_location": return `📍 Sending location`;
+    case "tg_send_media_group": return `🖼 Sending album`;
+    case "tg_copy_message": return `📋 Copying message`;
+    case "tg_invite_link": return `🔗 Invite link`;
+    case "tg_stop_poll": return `🛑 Stopping poll`;
+    case "tg_set_title": return `✏️ Setting title`;
+    case "tg_approve_join": return `✅ Approving join`;
+    case "tg_say_and_pin": return `📌 Send+pin`;
+    case "tg_broadcast": return `📢 Broadcasting`;
+    case "tg_user_info": return `🕵️ User dossier`;
+    case "tg_exec": return `⚡ Exec ${String(a.code || "").slice(0, 40)}`;
+    case "tg_api": return `🔌 API ${a.method || ""}`;
     case "read_skill": return `📚 Reading skill ${a.section || ""}`;
     default: return `⚙️ ${name}`;
   }
