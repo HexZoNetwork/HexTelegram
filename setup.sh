@@ -32,35 +32,34 @@ done
 [ -t 0 ] || NONINTERACTIVE=1
 [ "$CHECK_ONLY" = "1" ] && NONINTERACTIVE=1
 ask() {
-  local prompt="$1" def="$2" var="$3" ans
+  local prompt="$1" def="$2" var="$3" _in
   if [ "$NONINTERACTIVE" = "1" ]; then printf -v "$var" '%s' "$def"; return 0; fi
   if [ -n "$def" ]; then printf '%s [%s]: ' "$prompt" "$def" >&2
   else printf '%s: ' "$prompt" >&2; fi
-  IFS= read -r ans < /dev/tty || ans=""
-  [ -z "$ans" ] && ans="$def"
-  printf -v "$var" '%s' "$ans"
+  IFS= read -r _in < /dev/tty || _in=""
+  [ -z "$_in" ] && _in="$def"
+  printf -v "$var" '%s' "$_in"
 }
 ask_secret() {
-  local prompt="$1" def="$2" var="$3" ans
+  local prompt="$1" def="$2" var="$3" _in
   if [ "$NONINTERACTIVE" = "1" ]; then printf -v "$var" '%s' "$def"; return 0; fi
   if [ -n "$def" ]; then printf '%s [keep current]: ' "$prompt" >&2
   else printf '%s: ' "$prompt" >&2; fi
-  IFS= read -rs ans < /dev/tty || ans=""
+  IFS= read -rs _in < /dev/tty || _in=""
   echo >&2
-  [ -z "$ans" ] && ans="$def"
-  printf -v "$var" '%s' "$ans"
+  [ -z "$_in" ] && _in="$def"
+  printf -v "$var" '%s' "$_in"
 }
 ask_yn() {
-  local prompt="$1" def="${2:-N}" var="$3" ans
+  local prompt="$1" def="${2:-N}" var="$3" _in
   def="$(echo "$def" | tr '[:upper:]' '[:lower:]')"
   if [ "$NONINTERACTIVE" = "1" ]; then printf -v "$var" '%s' "$def"; return 0; fi
   local hint="(y/N)"; [ "$def" = "y" ] && hint="(Y/n)"
   printf '%s %s: ' "$prompt" "$hint" >&2
-  IFS= read -r ans < /dev/tty || ans=""
-  ans="$(echo "${ans:-$def}" | tr '[:upper:]' '[:lower:]' | cut -c1)"
-  [ "$ans" != "y" ] && ans="n"
-  [ "$ans" != "n" ] && ans="$def"
-  printf -v "$var" '%s' "$ans"
+  IFS= read -r _in < /dev/tty || _in=""
+  _in="$(echo "${_in:-$def}" | tr '[:upper:]' '[:lower:]' | cut -c1)"
+  [ "$_in" != "y" ] && _in="n"
+  printf -v "$var" '%s' "$_in"
 }
 is_yn_yes() { [ "${1:-n}" = "y" ]; }
 mask() {
