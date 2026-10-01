@@ -39,11 +39,11 @@ done
 
 if [ -n "$CHROME_BIN" ]; then
   echo "  found: $CHROME_BIN"
-  "$CHROME_BIN" --version 2>&1 | head -1 || true
+  "$CHROME_BIN" --version 2>/dev/null | grep -iv "cannot change mount\|update.go" | head -1 || true
   if file "$CHROME_BIN" 2>/dev/null | grep -q "shell script"; then
     warn "snap wrapper detected — screenshots must write under ~/snap/chromium (tool already handles this)"
   fi
-  SHOT_OUT=$(./tools '{"name":"web_screenshot","args":{"url":"https://example.com"}}' 2>&1 | head -3 || true)
+  SHOT_OUT=$(./tools '{"name":"web_screenshot","args":{"url":"https://example.com"}}' 2>&1 | grep -v "cannot change mount namespace\|update.go" | head -3 || true)
   echo "  $SHOT_OUT" | head -3
   if echo "$SHOT_OUT" | grep -q "^SCREENSHOT:"; then
     SHOT_PATH=$(echo "$SHOT_OUT" | sed -n 's/^SCREENSHOT: \([^ ]*\).*/\1/p')
