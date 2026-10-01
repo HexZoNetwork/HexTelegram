@@ -24,11 +24,12 @@ const SKILLS_PATH = path.join(__dirname, "SKILLS.md");
 let SKILLS_BOOK = "";
 try { SKILLS_BOOK = fs.readFileSync(SKILLS_PATH, "utf8"); } catch { SKILLS_BOOK = ""; }
 const SHORT_PROMPT =
-  "You are Hexzie, the HexTelegram AI assistant by HexzoNetwork. Tools: shell_exec, file_read/write/list, get_time, calc, web_search/fetch/check/screenshot, sysinfo, tg_* (send/buttons/photo/doc/audio/video/sticker/poll/dice/location/venue/contact/mediagroup/copy/edit/delete/forward/action/get_chat/admins/member/ban/unban/restrict/promote/invite/pin/react) + tg_exec (UNIVERSAL code-drop: raw Telegraf JS with telegram/chat_id/me/reply helpers — use when NO tg_* tool fits) " +
+  "You are Hexzie, the HexTelegram AI assistant by HexzoNetwork. Tools: shell_exec, file_read/write/list, get_time, calc, web_search/fetch/check/screenshot, sysinfo, tg_* (send/buttons/photo/doc/audio/video/sticker/poll/dice/location/venue/contact/mediagroup/copy/edit/delete/forward/action/get_chat/admins/member/ban/unban/restrict/promote/invite/pin/react) + tg_event (UNIVERSAL: write raw Telegraf JS yourself when NO dedicated tg_* tool fits — helpers: telegram, chat_id, me, reply) " +
   "Rules: (0) 'find/search/article/who is X' -> web_search FIRST, then web_fetch best hits. NEVER web_check google/duckduckgo search URLs. " +
   "(1) 'check site <url>' -> web_check first, then web_fetch/screenshot. " +
   "(2) 'chat/send id <n>' -> tg_get_chat verify, then tg_send_message; on TG ERROR warn plainly (blocked / never pressed START / no rights / flood-wait) — never claim success on error. " +
   "(2b) 'send message with button(s) ...' -> tg_send_buttons with text (+optional parse_mode Markdown/HTML for rich formatting) and buttons=[[{'text','callback_data'|'url'}]]. One call sends text+buttons. " +
+  "(2d) MISSING TOOL? -> use tg_event with code, NEVER say unsupported. There is NO getMessage/getHistory Bot API method — NEVER try to fetch messages by id. Replied-to photos/videos/files arrive auto-loaded as [Replied-to ...] (+ vision thumbnail for video); describe the thumbnail + metadata. If context shows a media reply but NO [Replied-to ...] block, say you cannot see it and ask the user to resend/forward it. NEVER hallucinate message_ids.  Pin example: code=\"await telegram.sendMessage(chat_id, 'hi'); await telegram.pinChatMessage(chat_id, 1); return 'done'\". Raw API example: code=\"const r = await telegram.callApi('stopPoll', {chat_id, message_id: 5}); return JSON.stringify(r)\". " +
   "(2c) Attached files: user message may include '[Attached ...]' with saved /tmp path + extracted content, or an image via vision. Summarize/answer DIRECTLY, no tools needed. file_read on the /tmp path only if you need more. NEVER run shell to fetch tokens/secrets. " +
   "(3) Image generation is DISABLED: if user asks to draw/make/create an image, say plainly it is turned off. NEVER call tools for it. " +
   "(4) Skill details: call read_skill(section) with a section name below, read result, act. " +
@@ -367,7 +368,7 @@ const TOOL_DEFS = [
   { type: "function", function: { name: "tg_broadcast", description: "CUSTOM composite: send the same text to multiple chat_ids (array of ids/usernames). Returns per-chat results.", parameters: { type: "object", properties: { chat_ids: { type: "array", items: { type: "string" } }, text: { type: "string" } }, required: ["chat_ids", "text"] } } },
   { type: "function", function: { name: "tg_user_info", description: "CUSTOM composite: full dossier on a user in a chat - profile plus membership plus photo count, one call.", parameters: { type: "object", properties: { chat_id: { type: "string" }, user_id: { type: "number" } }, required: ["user_id"] } } },
   { type: "function", function: { name: "tg_api", description: "UNIVERSAL fallback - call ANY api.telegram.org Bot API method directly via Telegraf callApi when no dedicated tg_* tool exists. method = snake_case Bot API method (e.g. stopPoll, setChatTitle, approveChatJoinRequest, sendGame, editMessageLiveLocation, setMyCommands). params = raw JSON object for that method (chat_id defaults to current chat). Prefer a dedicated tg_* tool when one exists.", parameters: { type: "object", properties: { method: { type: "string" }, params: { type: "object" } }, required: ["method"] } } },
-  { type: "function", function: { name: "tg_exec", description: "UNIVERSAL Telegraf code-drop: run raw JavaScript against the live Telegraf client when no dedicated tg_* tool fits. You get: telegram (full bot.telegram client — sendMessage, sendPhoto, pinChatMessage, banChatMember, callApi, ANYTHING Telegraf can do), chat_id (current chat), me (sender/chat/message ids), reply (async fn to reply in current chat). Write async JS, use await, end with return. Examples: await telegram.sendMessage(chat_id, 'hi'); return 'sent' | await telegram.pinChatMessage(chat_id, 123); return 'pinned' | const r = await telegram.callApi('stopPoll', {chat_id, message_id: 5}); return JSON.stringify(r). No require/process/fs/loops.", parameters: { type: "object", properties: { code: { type: "string", description: "Async JS body. Helpers: telegram, chat_id, me {chat,user,message_id,thread_id}, reply(text). Must return a value." } }, required: ["code"] } } },
+  { type: "function", function: { name: "tg_event", description: "UNIVERSAL Telegram tool — invent ANY missing Telegram action by writing raw Telegraf JavaScript. USE THIS whenever no dedicated tg_* tool fits the request, NEVER say unsupported. Helpers available: telegram = full live Telegraf client (sendMessage, sendPhoto, sendDocument, sendPoll, pinChatMessage, banChatMember, restrictChatMember, promoteChatMember, createChatInviteLink, setChatTitle, stopPoll, callApi, ... ANYTHING Telegraf can do), chat_id = current chat id, me = {chat, user, message_id, thread_id}, reply(text) = quick reply fn. Write async JS with await, end with return. Example pin: await telegram.sendMessage(chat_id, 'hello'); await telegram.pinChatMessage(chat_id, 12); return 'sent+pinned'. Example raw API: const r = await telegram.callApi('stopPoll', {chat_id, message_id: 5}); return JSON.stringify(r). Example info: const c = await telegram.getChat(chat_id); return c.title. Bounded for-loops OK; require/process/fs/exec/eval/infinite-loops blocked.", parameters: { type: "object", properties: { code: { type: "string", description: "Async JS body. Helpers: telegram, chat_id, me {chat,user,message_id,thread_id}, reply(text). Must return a value." } }, required: ["code"] } } },
   { type: "function", function: { name: "read_skill", description: "Read one SKILLS.md section for how-to. ALWAYS call before unfamiliar jobs. Sections: sites, recon, messaging, telegram-api, style, access, tools.", parameters: { type: "object", properties: { section: { type: "string", description: "e.g. sites, messaging" } }, required: ["section"] } } },
 ];
 
@@ -619,6 +620,8 @@ async function runTool(name, args, ctx) {
       }
       case "tg_api": {
         const method = String(args.method || "").trim();
+        if (/^(getMessage|getMessages|getHistory|getChatHistory|fetchMessage)$/i.test(method))
+          return "TG ERROR: that method does NOT exist in the Telegram Bot API — bots cannot fetch arbitrary messages by id. Replied-to media is auto-loaded; if missing, ask the user to resend it.";
         if (!/^\w+$/.test(method)) return "ERROR: bad method name (snake_case, e.g. stopPoll)";
         if (["deleteWebhook", "setWebhook", "logOut", "close"].includes(method))
           return `BLOCKED: '${method}' would break the bot (webhook/logout) — refused`;
@@ -627,8 +630,10 @@ async function runTool(name, args, ctx) {
         const res = await bot.telegram.callApi(method, params);
         return `tg_api ${method} OK: ${JSON.stringify(res).slice(0, 2000)}`;
       }
-      case "tg_exec": {
-        let code = String(args.code || "").trim();
+      case "tg_event": case "tg_events": case "tg_exec": {
+        let code = String(args.code || args.javascript || args.js || "").trim();
+        if (/\b(getMessage|getMessages|getHistory|getChatHistory|fetchMessage)\b/.test(code))
+          return "TG_EVENT ERROR: getMessage/getHistory do NOT exist in the Telegram Bot API — bots cannot fetch arbitrary messages by id. Replied-to media is auto-loaded into your context as [Replied-to ...] + vision image. If context shows a media reply but no [Replied-to ...] block, the media was NOT accessible — ask the user to resend/forward it, NEVER hallucinate message_ids.";
         if (!code) return "ERROR: empty code — drop Telegraf JS like: await telegram.sendMessage(chat_id, 'hi'); return 'sent'";
         if (code.length > 4000) return "ERROR: code too long (max 4000 chars) — split into smaller steps";
         if (/\brequire\b|\bprocess\b|\bglobal\b|\bBuffer\b|\bfs\b|child_process|\bexec\b|\bspawn\b|\beval\b|\bFunction\b|constructor|__proto__|prototype\s*\[|while\s*\(\s*true|for\s*\(\s*;\s*;/.test(code))
@@ -642,9 +647,9 @@ async function runTool(name, args, ctx) {
             fn(bot.telegram, curChat, me, reply, ctx),
             new Promise((_, rej) => setTimeout(() => rej(new Error("tg_exec timeout after 25s")), 25000)),
           ]);
-          if (res === undefined) return "tg_exec OK (no return value)";
-          return `tg_exec OK: ${JSON.stringify(res)?.slice(0, 2000) ?? String(res).slice(0, 2000)}`;
-        } catch (e) { return `TG_EXEC ERROR: ${e.message}`.slice(0, 2000); }
+          if (res === undefined) return "tg_event OK (ran, no return value)";
+          return `tg_event OK: ${JSON.stringify(res)?.slice(0, 2000) ?? String(res).slice(0, 2000)}`;
+        } catch (e) { return `TG_EVENT ERROR: ${e.message}`.slice(0, 2000); }
       }
       case "read_skill":
         return readSkill(args.section);
@@ -710,7 +715,7 @@ function actionLabel(name, args) {
     case "tg_say_and_pin": return `📌 Send+pin`;
     case "tg_broadcast": return `📢 Broadcasting`;
     case "tg_user_info": return `🕵️ User dossier`;
-    case "tg_exec": return `⚡ Exec ${String(a.code || "").slice(0, 40)}`;
+    case "tg_event": case "tg_events": case "tg_exec": return `⚡ Exec ${String(a.code || "").slice(0, 40)}`;
     case "tg_api": return `🔌 API ${a.method || ""}`;
     case "read_skill": return `📚 Reading skill ${a.section || ""}`;
     default: return `⚙️ ${name}`;
@@ -907,7 +912,8 @@ async function handlePrompt(chatId, userContent, ctx) {
   pushHistory(chatId, "user", userContent);
   const memSummary = memoryStore[chatId]?.summary || "";
   const messages = [{ role: "system", content: buildSystem(memSummary) }, ...conversations.get(chatId)];
-  const maxRounds = config.maxToolRounds ?? 8;
+  const hardCap = config.maxToolRounds;
+  let emptyRetries = 0;
   const mySeq = ++reqCounter;
   activeReq.set(chatId, mySeq);
   const isStale = () => activeReq.get(chatId) !== mySeq;
@@ -942,7 +948,11 @@ async function handlePrompt(chatId, userContent, ctx) {
   }, 5000);
   await showProg();
 
-  for (let round = 0; round < maxRounds; round++) {
+  for (let round = 0; ; round++) {
+    if (hardCap && round >= hardCap) {
+      dbg(`stop at round ${round} (config.maxToolRounds=${hardCap})`);
+      break;
+    }
     if (isStale()) { dbg(`abort at round ${round} (superseded)`); break; }
     let r;
     try {
@@ -978,6 +988,16 @@ async function handlePrompt(chatId, userContent, ctx) {
       }
     }
     if (isStale()) { dbg("abort after API (superseded)"); break; }
+    if (!(r.toolCalls || []).length && !(r.content || "").trim() && !emptyRetries) {
+      emptyRetries++;
+      dbg("empty content, no tools — one retry (non-stream)…");
+      await showProg();
+      try {
+        const r2 = await chatStream(messages, TOOL_DEFS, null, undefined, false, noteThought);
+        if ((r2.content || "").trim() || (r2.toolCalls || []).length) r = r2;
+        else { dbg("retry also empty — finalizing"); }
+      } catch (e) { dbg("empty-retry failed:", String(e.message || e).slice(0, 120)); }
+    }
     if (r.toolCalls?.length) {
       dbg(`round ${round}: tools`, r.toolCalls.map((t) => t.function?.name).join(","));
       messages.push({ role: "assistant", content: r.content || "", tool_calls: r.toolCalls });
@@ -1021,7 +1041,7 @@ async function handlePrompt(chatId, userContent, ctx) {
     dbg("exit stale (superseded, no render)");
     return;
   }
-  await show("(done — max tool rounds reached)");
+  await show("(done — stopped)");
 }
 
 
@@ -1082,15 +1102,36 @@ async function processText(ctx, text, imageUrl) {
     const f = ctx.from || {};
     const msg = ctx.message || ctx.channelPost || {};
     const rep = msg.reply_to_message;
+    const extRep = msg.external_reply;
+    if (config.debugLog && (rep || extRep)) {
+      const keys = rep ? Object.keys(rep).filter((k) => !["from", "chat", "entities"].includes(k)).slice(0, 15).join(",") : "";
+      console.log(`[media] reply msg=${msg.message_id} kind=${kindOf(rep) || (extRep ? "external(unavailable)" : "?")} rep_id=${rep?.message_id || extRep?.message_id || "?"} keys=[${keys}]`);
+    }
     const fwd = msg.forward_origin || msg.forward_from || msg.forward_from_chat;
+    const repKind = kindOf(rep);
+    const repDesc = rep
+      ? (repKind === "text" || repKind === "caption" ? (rep.text || rep.caption || "").slice(0, 120)
+        : `[${repKind}${rep.caption ? `: "${String(rep.caption).slice(0, 80)}"` : ""}]`) : "";
     const contextBlock =
       `[Context: this message came from chat_id=${c.id} (type=${c.type}${c.title ? `, title="${c.title}"` : ""}${c.username ? `, @${c.username}` : ""}), ` +
       `sender user_id=${f.id}${f.username ? ` (@${f.username})` : ""}${f.first_name ? ` "${f.first_name}"` : ""}, ` +
       `message_id=${msg.message_id || "?"}.` +
-      `${rep ? ` Replying to message_id=${rep.message_id} from user_id=${rep.from?.id} (${(rep.text || rep.caption || "[media]").slice(0, 120)}).` : ""}` +
+      `${rep ? ` Replying to message_id=${rep.message_id} from user_id=${rep.from?.id} (${repDesc}).` : ""}` +
+      `${extRep ? ` Reply target lives in another chat (message_id=${extRep.message_id}) — its media is NOT accessible.` : ""}` +
       `${fwd ? ` Forwarded content (origin chat info may be limited by privacy).` : ""}` +
       ` When user says "this group/chat/id", they mean chat_id=${c.id} — use tg_get_chat on it directly.]`;
-    const body = `${contextBlock}\n\nUser says: ${text}`;
+    let body = `${contextBlock}\n\nUser says: ${text}`;
+    let autoMedia = null;
+    if (!imageUrl && !/\[(Replied-to|Attached)/.test(String(typeof text === "string" ? text : "")) && hasRepliedMedia(rep)) {
+      try {
+        autoMedia = await loadRepliedMedia(ctx);
+        if (config.debugLog) console.log(`[media] safety-net load: ${autoMedia ? "attached" : "null"}`);
+      } catch (e) { if (config.debugLog) console.log(`[media] safety-net failed: ${e.message}`); }
+    }
+    if (autoMedia) {
+      body += `\n\n${autoMedia.extraText}`;
+      imageUrl = imageUrl || autoMedia.imageUrl || undefined;
+    }
     const userContent = imageUrl
       ? [{ type: "text", text: body }, { type: "image_url", image_url: { url: imageUrl } }]
       : body;
@@ -1435,7 +1476,7 @@ for (const cmd of GROUP_CMDS) {
     const text = ctx.message?.text || "";
     const found = extractGroupPrompt(ctx, text);
     if (!found || found.empty) return ctx.reply(`Usage: /${cmd} <your question>`);
-    if (ctx.message?.reply_to_message?.document || ctx.message?.reply_to_message?.photo) {
+    if (hasRepliedMedia(ctx.message?.reply_to_message)) {
       try {
         const media = await loadRepliedMedia(ctx);
         if (media) return processText(ctx, `${found.prompt}\n\n${media.extraText}`, media.imageUrl || undefined);
@@ -1451,7 +1492,7 @@ bot.on("text", async (ctx) => {
   if (ctx.chat?.type === "private") {
     if (/^\/(talk|t|new|model|id|chatid|start|help|adduser|deluser|users|img|forget|apis|addapi|delapi)(@\w+)?(\s|$)/i.test(text.trim())) return;
 
-    if (ctx.message?.reply_to_message?.document || ctx.message?.reply_to_message?.photo) {
+    if (hasRepliedMedia(ctx.message?.reply_to_message)) {
       try {
         await ctx.sendChatAction("typing").catch(() => {});
         const media = await loadRepliedMedia(ctx);
@@ -1464,7 +1505,7 @@ bot.on("text", async (ctx) => {
   if (config.debugLog) console.log(`[grp] chat=${ctx.chat?.id} type=${ctx.chat?.type} from=${ctx.from?.id} username=${ctx.from?.username || "?"} botUsername=${BOT_USERNAME || "(empty)"} botId=${BOT_ID} via=${found?.via || "NONE"} entities=${JSON.stringify((ctx.message.entities || []).map((e) => e.type))} text=${text.slice(0, 80)}`);
   if (!found) return;
 
-  if (ctx.message?.reply_to_message?.document || ctx.message?.reply_to_message?.photo) {
+  if (hasRepliedMedia(ctx.message?.reply_to_message)) {
     try {
       const media = await loadRepliedMedia(ctx);
       if (media) return processText(ctx, `${found.prompt}\n\n${media.extraText}`, media.imageUrl || undefined);
@@ -1493,15 +1534,103 @@ bot.on("photo", async (ctx) => {
 });
 
 
-async function downloadToTmp(ctx, fileId, nameHint) {
-  const link = String(await ctx.telegram.getFileLink(fileId));
+function fetchBufferIPv4(rawUrl, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const doGet = (u, redirs) => {
+      let lib;
+      try { lib = String(u).startsWith("https:") ? https : require("http"); }
+      catch (e) { return reject(e); }
+      let req;
+      try {
+        req = lib.get(u, { lookup: ipv4Lookup, timeout: timeoutMs || 30000 }, (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirs > 0) {
+            res.resume();
+            try { return doGet(new URL(res.headers.location, u).toString(), redirs - 1); }
+            catch (e) { return reject(e); }
+          }
+          if (res.statusCode !== 200) {
+            res.resume();
+            return reject(new Error(`download HTTP ${res.statusCode}`));
+          }
+          const chunks = [];
+          let total = 0;
+          res.on("data", (d) => { chunks.push(d); total += d.length; });
+          res.on("end", () => resolve({ buf: Buffer.concat(chunks), headers: res.headers }));
+          res.on("error", reject);
+        });
+      } catch (e) { return reject(e); }
+      req.on("timeout", () => { try { req.destroy(new Error("download timeout after " + (timeoutMs || 30000) + "ms")); } catch {} });
+      req.on("error", reject);
+    };
+    doGet(rawUrl, 3);
+  });
+}
+function errFull(e) {
+  const c = e?.cause ? ` (cause: ${e.cause.message || e.cause.code || e.cause})` : "";
+  return `${e?.message || e}${c}`;
+}
+async function downloadToTmp(ctx, fileId, nameHint, maxMB) {
+  let link;
+  try {
+    link = String(await ctx.telegram.getFileLink(fileId));
+  } catch (e) { throw new Error(`getFileLink failed: ${errFull(e)}`); }
   const safe = String(nameHint || "file").replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 80) || "file";
   const out = `/tmp/tg-${Date.now()}-${safe}`;
-  const r = await fetch(link);
-  if (!r.ok) throw new Error(`download HTTP ${r.status}`);
-  const buf = Buffer.from(await r.arrayBuffer());
-  fs.writeFileSync(out, buf);
-  return { path: out, link, size: buf.length };
+  const cap = (maxMB || 25) * 1024 * 1024;
+  let lastErr = null;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const { buf, headers } = await fetchBufferIPv4(link, 30000);
+      const len = Number(headers["content-length"] || buf.length);
+      if (len > cap) throw new Error(`file too big (${(len / 1048576).toFixed(1)}MB > ${maxMB || 25}MB)`);
+      if (buf.length > cap) throw new Error(`file too big (${(buf.length / 1048576).toFixed(1)}MB > ${maxMB || 25}MB)`);
+      fs.writeFileSync(out, buf);
+      if (config.debugLog) console.log(`[media] downloaded ${safe} ${buf.length}B -> ${out} (try ${i + 1})`);
+      return { path: out, link, size: buf.length };
+    } catch (e) {
+      lastErr = e;
+      if (config.debugLog) console.log(`[media] download try ${i + 1}/3 failed: ${errFull(e)}`);
+      if (/too big|HTTP 4/.test(e.message)) throw e;
+      await sleep((i + 1) * 1500);
+    }
+  }
+  throw new Error(`fetch failed after 3 tries: ${errFull(lastErr)}`);
+}
+function hasRepliedMedia(rep) {
+  if (!rep) return false;
+  return !!(rep.photo?.length || rep.document || rep.video || rep.animation ||
+    rep.video_note || rep.voice || rep.audio || rep.sticker);
+}
+function kindOf(rep) {
+  if (!rep) return null;
+  if (rep.photo?.length) return "photo";
+  if (rep.document) return "document";
+  if (rep.video) return "video";
+  if (rep.animation) return "animation";
+  if (rep.video_note) return "video_note";
+  if (rep.voice) return "voice";
+  if (rep.audio) return "audio";
+  if (rep.sticker) return "sticker";
+  if (rep.poll) return "poll";
+  if (rep.location) return "location";
+  if (rep.text) return "text";
+  if (rep.caption) return "caption";
+  return "other";
+}
+async function loadVideoLike(ctx, v, kind, fallbackName) {
+  const label = kind === "animation" ? "GIF" : kind === "video_note" ? "video note" : "video";
+  let dl = null;
+  try { dl = await downloadToTmp(ctx, v.file_id, fallbackName || ("replied-" + kind + ".mp4")); }
+  catch (e) { if (config.debugLog) console.log(`[media] ${kind} download failed: ${e.message}`); }
+  let thumbUrl = null;
+  const thumbId = v.thumb?.file_id || v.thumbnail?.file_id;
+  if (thumbId) {
+    try { thumbUrl = String(await ctx.telegram.getFileLink(thumbId)); }
+    catch (e) { if (config.debugLog) console.log(`[media] ${kind} thumb failed: ${e.message}`); }
+  }
+  const meta = `${label}: duration=${v.duration || "?"}s${v.width ? ` ${v.width}x${v.height}` : ""}${dl ? ` ${dl.size}B saved at ${dl.path} (file_id=${v.file_id})` : ` file_id=${v.file_id} (download failed)`}`;
+  if (thumbUrl) return { imageUrl: thumbUrl, extraText: `[Replied-to ${meta}. Look at the THUMBNAIL via vision and describe what the ${label} likely shows. I can resend it with tg_send_video (file_id or local path).]` };
+  return { imageUrl: null, extraText: `[Replied-to ${meta}. No preview frame available — I can't watch it, but I can resend it with tg_send_video. Ask for a screenshot/photo to see content.]` };
 }
 function isTextName(name, mime) {
   if ((mime || "").startsWith("text/")) return true;
@@ -1539,6 +1668,11 @@ async function loadMediaForModel(ctx, fileId, name, mime, size) {
 async function loadRepliedMedia(ctx) {
   const rep = ctx.message?.reply_to_message;
   if (!rep) return null;
+  const kind = rep.photo?.length ? "photo" : rep.document ? "document" : rep.video ? "video"
+    : rep.animation ? "animation" : rep.video_note ? "video_note" : rep.voice ? "voice"
+    : rep.audio ? "audio" : rep.sticker ? "sticker" : null;
+  if (config.debugLog) console.log(`[media] replied kind=${kind || "(text/other)"} msg=${rep.message_id}`);
+  if (!kind) return null;
   try {
     if (rep.photo?.length) {
       const fid = rep.photo[rep.photo.length - 1].file_id;
@@ -1549,11 +1683,24 @@ async function loadRepliedMedia(ctx) {
       const d = rep.document;
       return await loadMediaForModel(ctx, d.file_id, d.file_name || "replied-file", d.mime_type, d.file_size);
     }
-    if (rep.video) {
-      return { imageUrl: null, extraText: `[Replied-to video (file_id=${rep.video.file_id}, caption=${rep.caption || "-"}). I can't watch video — ask for a screenshot/photo.]` };
+    if (rep.video) return await loadVideoLike(ctx, rep.video, "video", "replied-video.mp4");
+    if (rep.animation) return await loadVideoLike(ctx, rep.animation, "animation", "replied-anim.mp4");
+    if (rep.video_note) return await loadVideoLike(ctx, rep.video_note, "video_note", "replied-note.mp4");
+    if (rep.voice || rep.audio) {
+      const a = rep.voice || rep.audio;
+      const dl = await downloadToTmp(ctx, a.file_id, "replied-audio.ogg", 10);
+      return { imageUrl: null, extraText: `[Replied-to ${rep.voice ? "voice message" : "audio"} (${a.duration || "?"}s, ${dl.size}B saved at ${dl.path}, file_id=${a.file_id}). No transcription available — I can resend it with tg_send_voice/audio. Ask user to type instead.]` };
+    }
+    if (rep.sticker) {
+      const s = rep.sticker;
+      const dl = await downloadToTmp(ctx, s.file_id, "replied-sticker.webp", 5);
+      let thumbUrl = null;
+      if (s.thumb?.file_id) { try { thumbUrl = String(await ctx.telegram.getFileLink(s.thumb.file_id)); } catch {} }
+      return { imageUrl: thumbUrl || dl.link, extraText: `[Replied-to sticker (emoji=${s.emoji || "?"}, ${dl.size}B saved at ${dl.path}). React briefly; look via vision if visible.]` };
     }
   } catch (e) {
-    return { imageUrl: null, extraText: `[Tried to load replied-to media but failed: ${e.message}. Ask user to resend.]` };
+    if (config.debugLog) console.log(`[media] replied ${kind} failed: ${e.message}`);
+    return { imageUrl: null, extraText: `[Tried to load replied-to ${kind} but failed: ${errFull(e)}. Ask user to resend.]` };
   }
   return null;
 }
@@ -1579,17 +1726,54 @@ bot.on("document", async (ctx) => {
 });
 
 bot.on("voice", async (ctx) => {
-  if (ctx.chat?.type !== "private") { ctx.reply("⚠️ Voice notes only work in private chat — please type your message.").catch(() => {}); return; }
-  processText(ctx, "User sent a voice message (no transcription available). Warn briefly that voice isn't transcribed and ask them to type instead.");
+  const a = ctx.message.voice || {};
+  const trig = ctx.chat?.type !== "private" ? extractGroupPrompt(ctx, "voice message") : null;
+  if (ctx.chat?.type !== "private" && !trig) return;
+  try {
+    await ctx.sendChatAction("typing").catch(() => {});
+    const dl = await downloadToTmp(ctx, a.file_id, "voice.ogg", 10);
+    if (config.debugLog) console.log(`[media] voice ${dl.size}B -> ${dl.path}`);
+    return processText(ctx, `${trig?.prompt || "Transcribe if possible"}: user sent a voice message (${a.duration || "?"}s, ${dl.size}B saved at ${dl.path}, file_id=${a.file_id}). No transcription available — say so briefly, offer to help if they type it out. I can resend it with tg_send_voice.`);
+  } catch (e) { return processText(ctx, `User sent a voice message (download failed: ${e.message}). Warn briefly voice isn't transcribed and ask them to type instead.`); }
 });
-bot.on("video_note", (ctx) => ctx.reply("⚠️ I can't watch video notes — please type your message.").catch(() => {}));
+bot.on("video_note", async (ctx) => {
+  const v = ctx.message.video_note || {};
+  if (ctx.chat?.type !== "private" && !extractGroupPrompt(ctx, "video note")) return;
+  try {
+    await ctx.sendChatAction("typing").catch(() => {});
+    const media = await loadVideoLike(ctx, v, "video_note", "note.mp4");
+    return processText(ctx, `Describe this video note.\n\n${media.extraText}`, media.imageUrl || undefined);
+  } catch (e) { ctx.reply("⚠️ Can't download that video note — please type your message.").catch(() => {}); }
+});
 bot.on("video", async (ctx) => {
   const v = ctx.message.video || {};
   if (ctx.chat?.type !== "private" && !extractGroupPrompt(ctx, ctx.message.caption || "video")) return;
-  processText(ctx, `User sent a video (file_id=${v.file_id}, ${v.duration || "?"}s, caption=${ctx.message.caption || "-"}). I can't watch it — describe what I can do instead (they can send a screenshot/photo).`);
+  try {
+    await ctx.sendChatAction("typing").catch(() => {});
+    const media = await loadVideoLike(ctx, v, "video", v.file_name || "video.mp4");
+    const ask = (ctx.message.caption || "Describe this video.").slice(0, 500);
+    return processText(ctx, `${ask}\n\n${media.extraText}`, media.imageUrl || undefined);
+  } catch (e) {
+    processText(ctx, `User sent a video (file_id=${v.file_id}, ${v.duration || "?"}s, caption=${ctx.message.caption || "-"}). Download failed (${e.message}) — describe what I can do instead (they can send a screenshot/photo).`);
+  }
 });
-bot.on("audio", (ctx) => ctx.reply("⚠️ I can't listen to audio files — please type your message.").catch(() => {}));
-bot.on("animation", (ctx) => ctx.reply("⚠️ I can't watch GIFs — send a photo/screenshot if you want it described.").catch(() => {}));
+bot.on("audio", async (ctx) => {
+  const a = ctx.message.audio || {};
+  if (ctx.chat?.type !== "private" && !extractGroupPrompt(ctx, ctx.message.caption || "audio")) return;
+  try {
+    const dl = await downloadToTmp(ctx, a.file_id, a.file_name || "audio.mp3", 15);
+    return processText(ctx, `User sent audio: ${a.title || a.file_name || "audio"} (${a.duration || "?"}s, ${dl.size}B saved at ${dl.path}, file_id=${a.file_id}). I can't listen — say so briefly and ask what they want (I can resend it with tg_send_audio).`);
+  } catch (e) { ctx.reply("⚠️ I can't listen to audio files — please type your message.").catch(() => {}); }
+});
+bot.on("animation", async (ctx) => {
+  const a = ctx.message.animation || {};
+  if (ctx.chat?.type !== "private" && !extractGroupPrompt(ctx, "GIF")) return;
+  try {
+    await ctx.sendChatAction("typing").catch(() => {});
+    const media = await loadVideoLike(ctx, a, "animation", "anim.mp4");
+    return processText(ctx, `React to this GIF briefly.\n\n${media.extraText}`, media.imageUrl || undefined);
+  } catch (e) { ctx.reply("⚠️ Can't download that GIF — send a photo/screenshot if you want it described.").catch(() => {}); }
+});
 bot.on("location", async (ctx) => {
   const l = ctx.message.location || {};
   if (ctx.chat?.type !== "private" && !extractGroupPrompt(ctx, "location")) return;

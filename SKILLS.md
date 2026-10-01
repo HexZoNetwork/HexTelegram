@@ -102,6 +102,14 @@ This book teaches you HOW to use your tools. Follow it every time.
    failure + reason + next step.
 
 ## 6. Telegram API notes (Telegraf.js v4 / Bot API)
+- MISSING-TOOL RULE: if the user asks for ANY Telegram action with no dedicated
+  tg_* tool above (e.g. pin, stopPoll, setChatTitle, games, live location,
+  forum topics), use `tg_event` with a `code` string — NEVER say unsupported.
+  Helpers: `telegram` (full live Telegraf client), `chat_id` (current chat),
+  `me` ({chat, user, message_id, thread_id}), `reply(text)`.
+  Pin pattern: `await telegram.sendMessage(chat_id, 'text'); await telegram.pinChatMessage(chat_id, <id>); return 'done'`
+  Raw API pattern: `const r = await telegram.callApi('stopPoll', {chat_id, message_id: 5}); return JSON.stringify(r)`
+  NO getMessage/getHistory method exists in the Bot API — NEVER fetch messages by id. Replied media arrives auto-loaded; if a reply shows media but no [Replied-to ...] block followed, tell the user you cannot see it and ask them to resend/forward it. NEVER hallucinate message_ids.
 - `tg_send_message/photo/document` default to the CURRENT chat when
   `chat_id` is omitted — use explicit `chat_id` only to message elsewhere.
 - IDs: users positive (`212100`), groups negative (`-12345`), channels
