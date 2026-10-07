@@ -187,14 +187,14 @@ Key details:
 HexTelegram/
 ├── bot.js                      ← Bot entry: streaming, agentic loop, all handlers
 ├── tools-go/
-│   └── main.go                 ← Go tool runner (shell, files, web, sysinfo)
-├── tools                       ← Built binary (`npm run build:tools`)
-├── config.json                 ← Your secrets (DO NOT commit)
-├── example.config.json         ← Template config (commit this)
-├── SKILLS.md                   ← AI skill book (tool recipes the model reads)
-├── memory.json                 ← Auto-summary memory (generated at runtime, gitignored)
-├── models_cache.json           ← Live-tested model list cache (generated, gitignored)
-├── storage.json                ← AI storage notes (generated at runtime, gitignored)
+│   └── main.go                 ← Go tool runner
+├── tools                       ← Built binary
+├── config.json                 ← Your secrets
+├── example.config.json         ← Template config
+├── SKILLS.md                   ← AI skill book
+├── memory.json                 ← Auto-summary memory
+├── models_cache.json           ← Live-tested model list cache
+├── storage.json                ← AI storage notes
 ├── text.json                   ← Tips/splashes shown in progress messages
 ├── setup.sh                    ← Install deps + build + sanity check
 └── package.json                ← Node deps (telegraf)
