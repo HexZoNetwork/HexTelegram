@@ -21,7 +21,9 @@
 * 💻 **Shell + files** — `shell_exec` (any command), `file_read` / `file_write` / `file_list` from `/`
 * 🌐 **Web** — `web_search` (Bing), `web_fetch`, `web_check` (site recon), `web_screenshot` (chromium → PNG)
 * ✉️ **Telegram tools** — send message/photo/document, inline buttons, edit, delete, forward, pin, chat actions, `get_chat`
-* 🖼️ **Vision + files** — send photo/document, reply-to-file summarization, PDF text extraction
+* 🖼️ **Vision + files** — send photo/document, reply-to-file summarization, PDF text extraction (images sent as base64 data URLs — no token leak, always renderable)
+* 💾 **AI storage** — persistent key-value notes (`storage.json`) the AI reads/writes via `store_*` tools; owner manages with `/str`
+* 📌 **Side notes** — `/btw <msg>` injects guidance into a running task without restarting it
 * 🔐 **Access control** — owner + allowlist, silently ignores strangers
 * 👥 **Groups** — `/talk` `/t` triggers, `= ~ |` prefixes, @mention, reply-to-bot
 * 📡 **Multi-API failover** — pool of endpoints, auto-rotate on 5xx/network errors
@@ -42,7 +44,7 @@ bash setup.sh
 npm start
 ```
 
-Manual steps (if you skip `setup.sh`):
+Manual steps:
 
 ```bash
 npm install
@@ -94,6 +96,7 @@ Everything else (streaming interval, group triggers, history window, timeouts) u
 | `/model` | anyone allowed | Show current chat model |
 | `/model c` | owner | Live-tested model picker (paged buttons) |
 | `/img ...` | anyone allowed | Replies "generation is turned off" (disabled) |
+| `/btw <msg>` | anyone allowed | Inject a side note into the currently running task|
 
 ### Owner only
 
@@ -105,6 +108,11 @@ Everything else (streaming interval, group triggers, history window, timeouts) u
 | `/apis` | List API pool (★ = active) |
 | `/addapi <url> <key>` | Live-test + add API endpoint |
 | `/delapi <n>` | Remove API #n (keeps at least one) |
+| `/str ls` | List AI storage entries (id + size + preview) |
+| `/str inspect <id>` | View one storage entry |
+| `/str send <id> <text>` (or reply to a message/file) | Save text into AI storage |
+| `/str del <id>` | Delete a storage entry |
+| `/str rn <id> <newname>` | Rename a storage entry |
 
 ### Groups / channels
 
@@ -139,7 +147,7 @@ Extra: `| <instruction>` replying to a message = instruction + quoted text (e.g.
 
 ### Node built-ins (`bot.js` `runTool`)
 
-`tg_send_message`, `tg_send_buttons` (inline keyboards), `tg_send_photo`, `tg_send_document`, `tg_edit_message`, `tg_delete_message`, `tg_forward`, `tg_chat_action`, `tg_get_chat`, `tg_pin`, `tg_unpin`, `read_skill` (reads one `SKILLS.md` section on demand).
+`tg_send_message`, `tg_send_buttons` (inline keyboards), `tg_send_photo`, `tg_send_document`, `tg_edit_message`, `tg_delete_message`, `tg_forward`, `tg_chat_action`, `tg_get_chat`, `tg_pin`, `tg_unpin`, plus media/composite/API tools (`tg_send_audio/video/voice/animation/sticker/location/venue/contact/dice/poll/media_group/copy`, `tg_edit_caption/buttons`, `tg_delete_messages`, `tg_get_chat_member/admins/member_count/user_photos`, `tg_ban/unban/restrict/promote`, `tg_invite_link/leave`, `tg_answer_callback/react/stop_poll/set_title/set_description/approve_join/decline_join/unpin_all/get_file`, `tg_say_and_pin/broadcast/user_info`, universal `tg_api` + `tg_event`), AI storage tools (`store_save/read/list/delete/rename`), and `read_skill` (reads one `SKILLS.md` section on demand).
 
 Local file paths (e.g. `/tmp/shot-….png`) work for photo/document sends.
 
@@ -163,7 +171,10 @@ Key details:
 * **Stale-supersede** — each chat keeps only the newest request; older ones abort and never render (`⏭ Skipped…`).
 * **Failover** — API pool (`config.apis`, migrated from legacy `baseURL`/`apiKey`); 5xx/network errors rotate to next API; 502/503/504 retried with backoff (8s, 20s) then non-stream fallback.
 * **Memory** — `conversations` map (last 30 turns) + `memory.json` summaries; overflow beyond 12 recent turns is async-summarized by the chat model.
-* **Auth** — `isAllowed(senderId)` checked FIRST on every update (groups included); strangers get silence. Owner-only gates on `/model c`, user/API management.
+* **Vision** — Telegram photos/docs/thumbnails are downloaded server-side and sent to the model as base64 data URLs (provider fetch of `api.telegram.org` links is unreliable and would leak the bot token); old image blocks are scrubbed from history so payloads stay small.
+* **AI storage** — `storage.json` key-value notes (`[A-Za-z0-9_-]`, ≤64-char ids, ≤50000-char content); AI uses `store_*` tools, owner uses `/str`; missing/corrupt runtime JSON files (`storage/memory/models_cache/text`) are auto-created on boot via `ensureJson`.
+* **Side notes** — `/btw` queues guidance into the live run for that chat; drained into the message list before every model round as `[SIDE NOTE ...]`; run liveness tracked via `activeReq` (cleaned on all exits).
+* **Auth** — `isAllowed(senderId)` checked FIRST on every update (groups included); strangers get silence. Owner-only gates on `/model c`, `/str`, user/API management.
 * **IPv4** — forced (`dns.setDefaultResultOrder("ipv4first")` + pinned lookup + Go `tcp4` dialer) because the host has broken IPv6.
 * **Boot** — `getMe` + `launch` retried forever (2s→60s backoff); `unhandledRejection`/`uncaughtException` logged, never crash.
 * **Skills** — `SKILLS.md` loaded once; `SHORT_PROMPT` (in `bot.js`) is the hot system prompt; `read_skill(section)` fetches detail on demand to save tokens.
@@ -181,8 +192,10 @@ HexTelegram/
 ├── config.json                 ← Your secrets (DO NOT commit)
 ├── example.config.json         ← Template config (commit this)
 ├── SKILLS.md                   ← AI skill book (tool recipes the model reads)
-├── memory.json                 ← Auto-summary memory (generated at runtime)
-├── models_cache.json           ← Live-tested model list cache (generated)
+├── memory.json                 ← Auto-summary memory (generated at runtime, gitignored)
+├── models_cache.json           ← Live-tested model list cache (generated, gitignored)
+├── storage.json                ← AI storage notes (generated at runtime, gitignored)
+├── text.json                   ← Tips/splashes shown in progress messages
 ├── setup.sh                    ← Install deps + build + sanity check
 └── package.json                ← Node deps (telegraf)
 ```
