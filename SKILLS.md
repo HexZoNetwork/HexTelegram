@@ -52,6 +52,11 @@ This book teaches you HOW to use your tools. Follow it every time.
 | CUSTOM: send+pin in one call | `tg_say_and_pin` | `text` (+ `chat_id`), pins right after sending. |
 | CUSTOM: broadcast to many chats | `tg_broadcast` | `chat_ids` (≤20), `text`. Per-chat ok/FAIL lines. |
 | CUSTOM: user dossier | `tg_user_info` | `user_id` (+ `chat_id`) → profile + status + photo count. |
+| AI storage: save note | `store_save` | `id` ([A-Za-z0-9_-] ≤64), `content` (≤50000 chars). Create/overwrite. |
+| AI storage: read note | `store_read` | `id` → stored text. |
+| AI storage: list notes | `store_list` | No args → id + size + preview lines. |
+| AI storage: delete note | `store_delete` | `id`. |
+| AI storage: rename note | `store_rename` | `id`, `new_id`. |
 | UNIVERSAL fallback: ANY Bot API method | `tg_api` | `method` (snake_case, e.g. `stopPoll`, `setChatTitle`, `setMyCommands`, `editMessageLiveLocation`, `sendGame`) + `params` object. `chat_id` auto-defaults to current chat. Use ONLY when no dedicated tg_* tool fits. Boot-breaking methods (`deleteWebhook`, `setWebhook`, `logOut`, `close`) are blocked. | (❤️ 👍 🔥 …). |
 
 ## 3. Recipe: user says "check this site https://…"
@@ -129,6 +134,16 @@ This book teaches you HOW to use your tools. Follow it every time.
   `ctx.telegram.sendPoll` = tg_send_poll,
   `ctx.telegram.banChatMember` = tg_ban,
   `ctx.telegram.sendMediaGroup` = tg_send_media_group.
+
+## 8. AI storage (persistent notes for you + owner `/str`)
+- YOU (the AI) manage notes with tools: `store_save` (remember this), `store_read`
+  (recall it), `store_list` (what do I have?), `store_delete`, `store_rename`.
+  Backed by `storage.json` — survives restarts. Use it whenever the user says
+  "remember/save/keep this", or when you want a draft/note available later.
+- OWNER manages the same store from chat: `/str ls` (list), `/str inspect <id>`
+  (view), `/str send <id> <text>` (save; or reply to a message/file with
+  `/str send <id>`), `/str del <id>`, `/str rn <id> <newname>` (rename).
+- IDs: `[A-Za-z0-9_-]`, max 64 chars. Content max ~50000 chars.
 
 ## 7. Reply style
 - Concise, Telegram-friendly. Short lines, no huge dumps (tools truncate
