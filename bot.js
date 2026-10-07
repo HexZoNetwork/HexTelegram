@@ -58,6 +58,7 @@ const SHORT_PROMPT =
   "(2) 'chat/send id <n>' -> tg_get_chat verify, then tg_send_message; on TG ERROR warn plainly (blocked / never pressed START / no rights / flood-wait) — never claim success on error. " +
   "(2b) 'send message with button(s) ...' -> tg_send_buttons with text (+optional parse_mode Markdown/HTML for rich formatting) and buttons=[[{'text','callback_data'|'url'}]]. One call sends text+buttons. " +
   "(2b2) AI STORAGE: you have persistent key-value notes via store_save/store_read/store_list/store_delete/store_rename. 'remember X'/'save this' -> store_save with a short id; 'what did I save' -> store_list then store_read. Owner manages via /str send|del|inspect|ls|rn." +
+  "(2b3) SIDE NOTES: a user message tagged [SIDE NOTE (sent mid-task via /btw ...)] is added guidance for your CURRENT task — fold it in and keep going, do not restart or ask for confirmation." +
   "(2d) MISSING TOOL? -> use tg_event with code, NEVER say unsupported. There is NO getMessage/getHistory Bot API method — NEVER try to fetch messages by id. Replied-to photos/videos/files arrive auto-loaded as [Replied-to ...] (+ vision thumbnail for video); describe the thumbnail + metadata. If context shows a media reply but NO [Replied-to ...] block, say you cannot see it and ask the user to resend/forward it. NEVER hallucinate message_ids.  Pin example: code=\"await telegram.sendMessage(chat_id, 'hi'); await telegram.pinChatMessage(chat_id, 1); return 'done'\". Raw API example: code=\"const r = await telegram.callApi('stopPoll', {chat_id, message_id: 5}); return JSON.stringify(r)\". " +
   "(2c) Attached files: user message may include '[Attached ...]' with saved /tmp path + extracted content, or an image via vision. Summarize/answer DIRECTLY, no tools needed. file_read on the /tmp path only if you need more. NEVER run shell to fetch tokens/secrets. " +
   "(3) Image generation is DISABLED: if user asks to draw/make/create an image, say plainly it is turned off. NEVER call tools for it. " +
@@ -861,17 +862,34 @@ async function summarizeTexts(texts, lang = "same language") {
     return (j.choices?.[0]?.message?.content || "").trim().slice(0, 1000);
   } catch { return ""; }
 }
+function scrubVision(content) {
+  if (!Array.isArray(content)) return content;
+  return content.map((p) => {
+    if (p && p.type === "image_url" && typeof p.image_url?.url === "string" && p.image_url.url.startsWith("data:")) {
+      return { type: "text", text: "[earlier image — already described above, do not re-fetch]" };
+    }
+    return p;
+  });
+}
 function pushHistory(chatId, role, content) {
   if (!conversations.has(chatId)) conversations.set(chatId, []);
   const h = conversations.get(chatId);
-  h.push({ role, content });
+  for (const m of h) {
+    if (Array.isArray(m.content)) m.content = scrubVision(m.content);
+  }
+  h.push({ role, content: scrubVision(content) });
   const max = config.maxHistory ?? 30;
   while (h.length > max) h.shift();
 
   const keep = config.memory?.recentKeep ?? 12;
   if (h.length > keep + 4) {
     const overflow = h.splice(0, h.length - keep);
-    const txt = overflow.map((m) => `${m.role}: ${typeof m.content === "string" ? m.content : "[media/tool]"}`.slice(0, 1000)).join("\n");
+    const txt = overflow.map((m) => {
+      const cc = Array.isArray(m.content)
+        ? m.content.filter((p) => p && p.type === "text").map((p) => p.text).join("\n")
+        : m.content;
+      return `${m.role}: ${typeof cc === "string" ? cc : "[media/tool]"}`.slice(0, 1000);
+    }).join("\n");
     summarizeTexts(txt).then((s) => {
       if (!s) return;
       const prev = memoryStore[chatId]?.summary || "";
@@ -984,7 +1002,17 @@ async function finalizeStream(ctx, msg, fullText) {
 
 
 const activeReq = new Map();
+const sideNotes = new Map();
 let reqCounter = 0;
+function drainSideNotes(chatId, messages) {
+  const q = sideNotes.get(chatId);
+  if (!q || !q.length) return 0;
+  sideNotes.set(chatId, []);
+  for (const n of q.slice(0, 5)) {
+    messages.push({ role: "user", content: `[SIDE NOTE (sent mid-task via /btw — treat as added guidance for the CURRENT task, not a new request): ${n}]` });
+  }
+  return Math.min(q.length, 5);
+}
 async function handlePrompt(chatId, userContent, ctx) {
   pushHistory(chatId, "user", userContent);
   const memSummary = memoryStore[chatId]?.summary || "";
@@ -1031,6 +1059,8 @@ async function handlePrompt(chatId, userContent, ctx) {
       break;
     }
     if (isStale()) { dbg(`abort at round ${round} (superseded)`); break; }
+    const drained = drainSideNotes(chatId, messages);
+    if (drained) { dbg(`injected ${drained} btw note(s) before round ${round}`); }
     let r;
     try {
       r = await chatStream(messages, TOOL_DEFS, null, undefined, true, noteThought);
@@ -1059,6 +1089,7 @@ async function handlePrompt(chatId, userContent, ctx) {
         if (isStale()) break;
         dbg("all retries failed:", String(lastErr.message || lastErr).slice(0, 200));
         clearInterval(liveTicker);
+        if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
         await show(`❌ ${providerDown ? "AI provider is down (502 Bad Gateway from host). Try again in a few minutes." : "Request failed: " + String(lastErr.message || lastErr).slice(0, 250)}`);
 
         return;
@@ -1108,10 +1139,12 @@ async function handlePrompt(chatId, userContent, ctx) {
     dbg("final answer len:", answer.length);
     pushHistory(chatId, "assistant", answer);
     clearInterval(liveTicker);
+    if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
     await finalizeStream(ctx, prog, answer);
     return;
   }
   clearInterval(liveTicker);
+  if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
   if (isStale()) {
 
     if (prog) { try { await safeEdit(ctx, prog.chat.id, prog.message_id, "⏭ Skipped — answering your newer message…"); } catch {} }
@@ -1139,7 +1172,7 @@ function extractGroupPrompt(ctx, rawText) {
     if (q.trim()) return { prompt: q.trim(), via: "/" + c.cmd + "+rep" };
     return { prompt: "", via: "/" + c.cmd, empty: true };
   }
-  if (c && ["new", "model", "id", "chatid", "start", "help", "adduser", "deluser", "users", "img", "forget", "apis", "addapi", "delapi", "str"].includes(c.cmd)) return null;
+  if (c && ["new", "model", "id", "chatid", "start", "help", "adduser", "deluser", "users", "img", "forget", "apis", "addapi", "delapi", "str", "btw"].includes(c.cmd)) return null;
 
   if (GROUP_PREFIXES.includes(text[0])) {
     const rest = text.slice(1).trim();
@@ -1227,7 +1260,7 @@ bot.start((ctx) => {
 
 Just send me a message — shell, files, websites, images, Telegram tools.
 
-Commands: /new • /model • /id • /chatid • /forget
+Commands: /new • /model • /id • /chatid • /forget • /btw
 Group triggers: /talk <q> • /t <q> • \`=\` \`~\` \`|\` • @mention • reply-to-me
 Owner: /adduser • /deluser • /users • /apis • /addapi • /delapi • /str`,
     { parse_mode: "Markdown" }
@@ -1475,6 +1508,16 @@ bot.command("str", async (ctx) => {
   }
   return ctx.reply("⚠️ " + usage);
 });
+bot.command("btw", async (ctx) => {
+  const note = (ctx.message?.text || "").replace(/^\/btw(@\w+)?\s*/i, "").trim();
+  if (!note) return ctx.reply("Usage: /btw <side note for the running task>\nInjects guidance into the AI's current run without restarting it.");
+  if (!activeReq.has(ctx.chat.id)) return ctx.reply("💤 Nothing running in this chat right now — just send your message normally.");
+  if (!sideNotes.has(ctx.chat.id)) sideNotes.set(ctx.chat.id, []);
+  const q = sideNotes.get(ctx.chat.id);
+  if (q.length >= 5) return ctx.reply("⚠️ Too many queued notes (5 max) — wait for the current run to pick them up.");
+  q.push(note.slice(0, 2000));
+  try { await ctx.reply(`📌 Noted — injected into the running task (queue #${q.length}).`); } catch {}
+});
 bot.command("chatid", async (ctx) => {
   const c = ctx.chat || {};
   let extra = "";
@@ -1636,7 +1679,7 @@ for (const cmd of GROUP_CMDS) {
 bot.on("text", async (ctx) => {
   const text = ctx.message.text || "";
   if (ctx.chat?.type === "private") {
-    if (/^\/(talk|t|new|model|id|chatid|start|help|adduser|deluser|users|img|forget|apis|addapi|delapi|str)(@\w+)?(\s|$)/i.test(text.trim())) return;
+    if (/^\/(talk|t|new|model|id|chatid|start|help|adduser|deluser|users|img|forget|apis|addapi|delapi|str|btw)(@\w+)?(\s|$)/i.test(text.trim())) return;
 
     if (hasRepliedMedia(ctx.message?.reply_to_message)) {
       try {
@@ -1669,13 +1712,17 @@ bot.on("photo", async (ctx) => {
     const found = extractGroupPrompt(ctx, caption || "Describe this image.");
     if (!found) return;
     try {
-      const link = await ctx.telegram.getFileLink(fileId);
-      return processText(ctx, found.prompt || "Describe this image.", String(link));
+      const dl = await downloadToTmp(ctx, fileId, "photo.jpg", 15);
+      const dataUrl = visionDataUrl(dl.path, "image/jpeg");
+      const extra = dataUrl ? "" : "\n\n[Photo saved at " + dl.path + " but vision preview unavailable — describe metadata only.]";
+      return processText(ctx, (found.prompt || "Describe this image.") + extra, dataUrl || undefined);
     } catch (e) { return ctx.reply(`⚠️ Can't read that photo: ${e.message}`).catch(() => {}); }
   }
   try {
-    const link = await ctx.telegram.getFileLink(fileId);
-    processText(ctx, caption || "Describe this image.", String(link));
+    const dl = await downloadToTmp(ctx, fileId, "photo.jpg", 15);
+    const dataUrl = visionDataUrl(dl.path, "image/jpeg");
+    const extra = dataUrl ? "" : `\n\n[Photo saved at ${dl.path} but vision preview unavailable — describe metadata only.]`;
+    processText(ctx, (caption || "Describe this image.") + extra, dataUrl || undefined);
   } catch (e) { ctx.reply(`⚠️ Can't read that photo: ${e.message}`).catch(() => {}); }
 });
 
@@ -1714,6 +1761,19 @@ function fetchBufferIPv4(rawUrl, timeoutMs) {
 function errFull(e) {
   const c = e?.cause ? ` (cause: ${e.cause.message || e.cause.code || e.cause})` : "";
   return `${e?.message || e}${c}`;
+}
+const VISION_MAX_BYTES = 2.5 * 1024 * 1024;
+function visionDataUrl(localPath, mime) {
+  try {
+    const st = fs.statSync(localPath);
+    if (!st.isFile() || st.size <= 0 || st.size > VISION_MAX_BYTES) return null;
+    const ext = path.extname(String(localPath)).toLowerCase();
+    const mt = mime && String(mime).startsWith("image/")
+      ? mime
+      : ({ ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp" }[ext] || null);
+    if (!mt) return null;
+    return `data:${mt};base64,${fs.readFileSync(localPath).toString("base64")}`;
+  } catch { return null; }
 }
 async function downloadToTmp(ctx, fileId, nameHint, maxMB) {
   let link;
@@ -1768,14 +1828,16 @@ async function loadVideoLike(ctx, v, kind, fallbackName) {
   let dl = null;
   try { dl = await downloadToTmp(ctx, v.file_id, fallbackName || ("replied-" + kind + ".mp4")); }
   catch (e) { if (config.debugLog) console.log(`[media] ${kind} download failed: ${e.message}`); }
-  let thumbUrl = null;
+  let thumbPath = null;
   const thumbId = v.thumb?.file_id || v.thumbnail?.file_id;
   if (thumbId) {
-    try { thumbUrl = String(await ctx.telegram.getFileLink(thumbId)); }
-    catch (e) { if (config.debugLog) console.log(`[media] ${kind} thumb failed: ${e.message}`); }
+    try {
+      const tdl = await downloadToTmp(ctx, thumbId, "thumb-" + (fallbackName || "thumb.jpg"), 5);
+      thumbPath = tdl.path;
+    } catch (e) { if (config.debugLog) console.log(`[media] ${kind} thumb failed: ${e.message}`); }
   }
   const meta = `${label}: duration=${v.duration || "?"}s${v.width ? ` ${v.width}x${v.height}` : ""}${dl ? ` ${dl.size}B saved at ${dl.path} (file_id=${v.file_id})` : ` file_id=${v.file_id} (download failed)`}`;
-  if (thumbUrl) return { imageUrl: thumbUrl, extraText: `[Replied-to ${meta}. Look at the THUMBNAIL via vision and describe what the ${label} likely shows. I can resend it with tg_send_video (file_id or local path).]` };
+  if (thumbPath) return { imageUrl: visionDataUrl(thumbPath, "image/jpeg"), imagePath: thumbPath, extraText: `[Replied-to ${meta}. Look at the THUMBNAIL via vision and describe what the ${label} likely shows. I can resend it with tg_send_video (file_id or local path).]` };
   return { imageUrl: null, extraText: `[Replied-to ${meta}. No preview frame available — I can't watch it, but I can resend it with tg_send_video. Ask for a screenshot/photo to see content.]` };
 }
 function isTextName(name, mime) {
@@ -1790,7 +1852,11 @@ function isImageName(name, mime) {
 
 async function loadMediaForModel(ctx, fileId, name, mime, size) {
   const dl = await downloadToTmp(ctx, fileId, name || "file");
-  if (isImageName(name, mime)) return { imageUrl: dl.link, extraText: `[Attached image file: ${name || "image"} (${dl.size} bytes, saved at ${dl.path}). Look at it via vision and describe/summarize.]` };
+  if (isImageName(name, mime)) {
+    const dataUrl = visionDataUrl(dl.path, mime);
+    const note = dataUrl ? "" : " (vision preview unavailable — file too big or bad type, describe metadata only)";
+    return { imageUrl: dataUrl, imagePath: dataUrl ? dl.path : null, extraText: `[Attached image file: ${name || "image"} (${dl.size} bytes, saved at ${dl.path}). Look at it via vision and describe/summarize.${note}]` };
+  }
   if (isTextName(name, mime) && dl.size < 200000) {
     try {
       const txt = fs.readFileSync(dl.path, "utf8").slice(0, 8000);
@@ -1823,7 +1889,9 @@ async function loadRepliedMedia(ctx) {
     if (rep.photo?.length) {
       const fid = rep.photo[rep.photo.length - 1].file_id;
       const dl = await downloadToTmp(ctx, fid, "replied-photo.jpg");
-      return { imageUrl: dl.link, extraText: `[Replied-to photo (saved at ${dl.path}). Look at it via vision.]` };
+      const dataUrl = visionDataUrl(dl.path, "image/jpeg");
+      const note = dataUrl ? "" : " (vision preview unavailable, describe metadata only)";
+      return { imageUrl: dataUrl, imagePath: dataUrl ? dl.path : null, extraText: `[Replied-to photo (saved at ${dl.path}). Look at it via vision.${note}]` };
     }
     if (rep.document) {
       const d = rep.document;
@@ -1840,9 +1908,12 @@ async function loadRepliedMedia(ctx) {
     if (rep.sticker) {
       const s = rep.sticker;
       const dl = await downloadToTmp(ctx, s.file_id, "replied-sticker.webp", 5);
-      let thumbUrl = null;
-      if (s.thumb?.file_id) { try { thumbUrl = String(await ctx.telegram.getFileLink(s.thumb.file_id)); } catch {} }
-      return { imageUrl: thumbUrl || dl.link, extraText: `[Replied-to sticker (emoji=${s.emoji || "?"}, ${dl.size}B saved at ${dl.path}). React briefly; look via vision if visible.]` };
+      let tpath = null;
+      if (s.thumb?.file_id) {
+        try { tpath = (await downloadToTmp(ctx, s.thumb.file_id, "replied-thumb.jpg", 5)).path; } catch {}
+      }
+      const dataUrl = visionDataUrl(tpath || dl.path, "image/jpeg");
+      return { imageUrl: dataUrl, imagePath: dataUrl ? (tpath || dl.path) : null, extraText: `[Replied-to sticker (emoji=${s.emoji || "?"}, ${dl.size}B saved at ${dl.path}). React briefly; look via vision if visible.]` };
     }
   } catch (e) {
     if (config.debugLog) console.log(`[media] replied ${kind} failed: ${e.message}`);
