@@ -1,6 +1,7 @@
 config.json
 memory.json
 models_cache.json
+storage.json
 node_modules/
 
 tools

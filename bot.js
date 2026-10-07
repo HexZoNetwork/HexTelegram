@@ -19,6 +19,34 @@ const { Telegraf } = require("telegraf");
 const CONFIG_PATH = path.join(__dirname, "config.json");
 const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
 
+function ensureJson(filePath, fallback) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed !== null && typeof parsed === "object") return parsed;
+    if (Array.isArray(fallback)) return Array.isArray(parsed) ? parsed : fallback;
+    return (parsed && typeof parsed === "object") ? parsed : fallback;
+  } catch {
+    try { fs.writeFileSync(filePath, JSON.stringify(fallback, null, 2) + "\n"); } catch {}
+    return JSON.parse(JSON.stringify(fallback));
+  }
+}
+
+const STORAGE_PATH = path.join(__dirname, "storage.json");
+let storage = ensureJson(STORAGE_PATH, {});
+function saveStorage() {
+  try { fs.writeFileSync(STORAGE_PATH, JSON.stringify(storage, null, 2) + "\n"); return true; }
+  catch (e) { console.error("saveStorage failed:", e.message); return false; }
+}
+function strIdOk(id) { return /^[A-Za-z0-9_-]{1,64}$/.test(String(id || "")); }
+function strGet(id) { return storage[String(id)] ?? null; }
+function strList() {
+  return Object.entries(storage).map(([id, v]) => ({
+    id, bytes: Buffer.byteLength(String(v?.content ?? ""), "utf8"),
+    updated: v?.updated || 0, preview: String(v?.content ?? "").slice(0, 80).replace(/\s+/g, " "),
+  })).sort((a, b) => a.id.localeCompare(b.id));
+}
+
 
 const SKILLS_PATH = path.join(__dirname, "SKILLS.md");
 let SKILLS_BOOK = "";
@@ -29,6 +57,7 @@ const SHORT_PROMPT =
   "(1) 'check site <url>' -> web_check first, then web_fetch/screenshot. " +
   "(2) 'chat/send id <n>' -> tg_get_chat verify, then tg_send_message; on TG ERROR warn plainly (blocked / never pressed START / no rights / flood-wait) — never claim success on error. " +
   "(2b) 'send message with button(s) ...' -> tg_send_buttons with text (+optional parse_mode Markdown/HTML for rich formatting) and buttons=[[{'text','callback_data'|'url'}]]. One call sends text+buttons. " +
+  "(2b2) AI STORAGE: you have persistent key-value notes via store_save/store_read/store_list/store_delete/store_rename. 'remember X'/'save this' -> store_save with a short id; 'what did I save' -> store_list then store_read. Owner manages via /str send|del|inspect|ls|rn." +
   "(2d) MISSING TOOL? -> use tg_event with code, NEVER say unsupported. There is NO getMessage/getHistory Bot API method — NEVER try to fetch messages by id. Replied-to photos/videos/files arrive auto-loaded as [Replied-to ...] (+ vision thumbnail for video); describe the thumbnail + metadata. If context shows a media reply but NO [Replied-to ...] block, say you cannot see it and ask the user to resend/forward it. NEVER hallucinate message_ids.  Pin example: code=\"await telegram.sendMessage(chat_id, 'hi'); await telegram.pinChatMessage(chat_id, 1); return 'done'\". Raw API example: code=\"const r = await telegram.callApi('stopPoll', {chat_id, message_id: 5}); return JSON.stringify(r)\". " +
   "(2c) Attached files: user message may include '[Attached ...]' with saved /tmp path + extracted content, or an image via vision. Summarize/answer DIRECTLY, no tools needed. file_read on the /tmp path only if you need more. NEVER run shell to fetch tokens/secrets. " +
   "(3) Image generation is DISABLED: if user asks to draw/make/create an image, say plainly it is turned off. NEVER call tools for it. " +
@@ -370,6 +399,11 @@ const TOOL_DEFS = [
   { type: "function", function: { name: "tg_api", description: "UNIVERSAL fallback - call ANY api.telegram.org Bot API method directly via Telegraf callApi when no dedicated tg_* tool exists. method = snake_case Bot API method (e.g. stopPoll, setChatTitle, approveChatJoinRequest, sendGame, editMessageLiveLocation, setMyCommands). params = raw JSON object for that method (chat_id defaults to current chat). Prefer a dedicated tg_* tool when one exists.", parameters: { type: "object", properties: { method: { type: "string" }, params: { type: "object" } }, required: ["method"] } } },
   { type: "function", function: { name: "tg_event", description: "UNIVERSAL Telegram tool — invent ANY missing Telegram action by writing raw Telegraf JavaScript. USE THIS whenever no dedicated tg_* tool fits the request, NEVER say unsupported. Helpers available: telegram = full live Telegraf client (sendMessage, sendPhoto, sendDocument, sendPoll, pinChatMessage, banChatMember, restrictChatMember, promoteChatMember, createChatInviteLink, setChatTitle, stopPoll, callApi, ... ANYTHING Telegraf can do), chat_id = current chat id, me = {chat, user, message_id, thread_id}, reply(text) = quick reply fn. Write async JS with await, end with return. Example pin: await telegram.sendMessage(chat_id, 'hello'); await telegram.pinChatMessage(chat_id, 12); return 'sent+pinned'. Example raw API: const r = await telegram.callApi('stopPoll', {chat_id, message_id: 5}); return JSON.stringify(r). Example info: const c = await telegram.getChat(chat_id); return c.title. Bounded for-loops OK; require/process/fs/exec/eval/infinite-loops blocked.", parameters: { type: "object", properties: { code: { type: "string", description: "Async JS body. Helpers: telegram, chat_id, me {chat,user,message_id,thread_id}, reply(text). Must return a value." } }, required: ["code"] } } },
   { type: "function", function: { name: "read_skill", description: "Read one SKILLS.md section for how-to. ALWAYS call before unfamiliar jobs. Sections: sites, recon, messaging, telegram-api, style, access, tools.", parameters: { type: "object", properties: { section: { type: "string", description: "e.g. sites, messaging" } }, required: ["section"] } } },
+  { type: "function", function: { name: "store_save", description: "Save text into AI storage under an id (create or overwrite). Use for remembering notes, snippets, drafts for later.", parameters: { type: "object", properties: { id: { type: "string", description: "storage id, [A-Za-z0-9_-] max 64" }, content: { type: "string", description: "text to store (max ~50000 chars)" } }, required: ["id", "content"] } } },
+  { type: "function", function: { name: "store_read", description: "Read text back from AI storage by id.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
+  { type: "function", function: { name: "store_list", description: "List all AI storage entries (id + size + preview).", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "store_delete", description: "Delete one AI storage entry by id.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
+  { type: "function", function: { name: "store_rename", description: "Rename an AI storage entry (old id -> new id).", parameters: { type: "object", properties: { id: { type: "string" }, new_id: { type: "string" } }, required: ["id", "new_id"] } } },
 ];
 
 function shellAllowed(cmd) {
@@ -653,6 +687,46 @@ async function runTool(name, args, ctx) {
       }
       case "read_skill":
         return readSkill(args.section);
+      case "store_save": {
+        const id = String(args.id || "").trim();
+        if (!strIdOk(id)) return "ERROR: bad id (use [A-Za-z0-9_-], max 64 chars)";
+        const content = String(args.content ?? "");
+        if (content.length > 50000) return "ERROR: content too long (max 50000 chars)";
+        storage[id] = { content, updated: Date.now() };
+        if (!saveStorage()) return "ERROR: save failed";
+        return `stored id=${id} (${Buffer.byteLength(content, "utf8")} bytes)`;
+      }
+      case "store_read": {
+        const id = String(args.id || "").trim();
+        if (!strIdOk(id)) return "ERROR: bad id";
+        const v = strGet(id);
+        if (!v) return `ERROR: no storage entry '${id}' (store_list to see all)`;
+        return `[storage:${id} updated=${new Date(v.updated || 0).toISOString()}]\n${String(v.content || "").slice(0, 8000)}`;
+      }
+      case "store_list": {
+        const all = strList();
+        if (!all.length) return "storage: (empty)";
+        return "storage:\n" + all.map((e) => `• ${e.id} (${e.bytes}B) — ${e.preview || "(empty)"}`).join("\n").slice(0, 4000);
+      }
+      case "store_delete": {
+        const id = String(args.id || "").trim();
+        if (!strIdOk(id)) return "ERROR: bad id";
+        if (!(id in storage)) return `ERROR: no storage entry '${id}'`;
+        delete storage[id];
+        if (!saveStorage()) return "ERROR: save failed";
+        return `deleted id=${id}`;
+      }
+      case "store_rename": {
+        const id = String(args.id || "").trim();
+        const nid = String(args.new_id || args.newId || "").trim();
+        if (!strIdOk(id) || !strIdOk(nid)) return "ERROR: bad id (use [A-Za-z0-9_-], max 64 chars)";
+        if (!(id in storage)) return `ERROR: no storage entry '${id}'`;
+        if (nid in storage && nid !== id) return `ERROR: '${nid}' already exists — delete it first`;
+        storage[nid] = storage[id];
+        if (nid !== id) delete storage[id];
+        if (!saveStorage()) return "ERROR: save failed";
+        return `renamed ${id} -> ${nid}`;
+      }
     }
   } catch (e) {
     return `TG ERROR: ${e.message}`.slice(0, 2000);
@@ -675,8 +749,7 @@ async function runTool(name, args, ctx) {
 
 
 const TEXT_PATH = path.join(__dirname, "text.json");
-let TEXT_BANK = { tips: [], splashes: [] };
-try { TEXT_BANK = JSON.parse(fs.readFileSync(TEXT_PATH, "utf8")); } catch { TEXT_BANK = { tips: [], splashes: [] }; }
+let TEXT_BANK = ensureJson(TEXT_PATH, { tips: [], splashes: [] });
 const pickTip = () => {
   const tips = TEXT_BANK.tips || [];
   const splash = TEXT_BANK.splashes || [];
@@ -715,6 +788,11 @@ function actionLabel(name, args) {
     case "tg_say_and_pin": return `📌 Send+pin`;
     case "tg_broadcast": return `📢 Broadcasting`;
     case "tg_user_info": return `🕵️ User dossier`;
+    case "store_save": return `💾 Storing ${a.id || ""}`;
+    case "store_read": return `📖 Storage read ${a.id || ""}`;
+    case "store_list": return `📦 Listing storage`;
+    case "store_delete": return `🗑 Deleting ${a.id || ""}`;
+    case "store_rename": return `✏️ Renaming ${a.id || ""}`;
     case "tg_event": case "tg_events": case "tg_exec": return `⚡ Exec ${String(a.code || "").slice(0, 40)}`;
     case "tg_api": return `🔌 API ${a.method || ""}`;
     case "read_skill": return `📚 Reading skill ${a.section || ""}`;
@@ -763,8 +841,7 @@ function thoughtSnippet(raw) {
 
 
 const MEMORY_PATH = path.join(__dirname, "memory.json");
-let memoryStore = {};
-try { memoryStore = JSON.parse(fs.readFileSync(MEMORY_PATH, "utf8")); } catch { memoryStore = {}; }
+let memoryStore = ensureJson(MEMORY_PATH, {});
 function saveMemory() {
   try { fs.writeFileSync(MEMORY_PATH, JSON.stringify(memoryStore).slice(0, 200000)); } catch {}
 }
@@ -1062,7 +1139,7 @@ function extractGroupPrompt(ctx, rawText) {
     if (q.trim()) return { prompt: q.trim(), via: "/" + c.cmd + "+rep" };
     return { prompt: "", via: "/" + c.cmd, empty: true };
   }
-  if (c && ["new", "model", "id", "chatid", "start", "help", "adduser", "deluser", "users", "img", "forget", "apis", "addapi", "delapi"].includes(c.cmd)) return null;
+  if (c && ["new", "model", "id", "chatid", "start", "help", "adduser", "deluser", "users", "img", "forget", "apis", "addapi", "delapi", "str"].includes(c.cmd)) return null;
 
   if (GROUP_PREFIXES.includes(text[0])) {
     const rest = text.slice(1).trim();
@@ -1152,7 +1229,7 @@ Just send me a message — shell, files, websites, images, Telegram tools.
 
 Commands: /new • /model • /id • /chatid • /forget
 Group triggers: /talk <q> • /t <q> • \`=\` \`~\` \`|\` • @mention • reply-to-me
-Owner: /adduser • /deluser • /users • /apis • /addapi • /delapi`,
+Owner: /adduser • /deluser • /users • /apis • /addapi • /delapi • /str`,
     { parse_mode: "Markdown" }
   ).catch((e) => console.warn("start reply failed:", e.message));
 });
@@ -1197,10 +1274,8 @@ async function testModels(ids, concurrency = 30) {
   return usable;
 }
 function readModelsCache(maxAgeMs = 24 * 3600 * 1000) {
-  try {
-    const c = JSON.parse(fs.readFileSync(MODELS_CACHE_PATH, "utf8"));
-    if (c.usable?.length && Date.now() - (c.tested_at || 0) < maxAgeMs) return c;
-  } catch {}
+  const c = ensureJson(MODELS_CACHE_PATH, { tested_at: 0, usable: [] });
+  if (c.usable?.length && Date.now() - (c.tested_at || 0) < maxAgeMs) return c;
   return null;
 }
 function writeModelsCache(usable) {
@@ -1329,6 +1404,77 @@ async function handleModelCallback(ctx) {
   return false;
 }
 bot.command("id", (ctx) => ctx.reply(`Your user ID: ${ctx.from.id}\nChat ID: ${ctx.chat.id}`));
+bot.command("str", async (ctx) => {
+  if (!isOwner(ctx)) return;
+  const raw = (ctx.message?.text || "").replace(/^\/str(@\w+)?\s*/i, "").trim();
+  const parts = raw.split(/\s+/).filter(Boolean);
+  const sub = (parts[0] || "").toLowerCase();
+  const usage = "Usage:\n/str ls\n/str inspect <id>\n/str send <id> <text> (or reply to a message)\n/str del <id>\n/str rn <id> <newname>";
+  if (!sub) return ctx.reply(usage);
+  if (sub === "ls") {
+    const all = strList();
+    if (!all.length) return ctx.reply("📦 Storage: (empty)");
+    const lines = all.map((e) => `• \`${e.id}\` (${e.bytes}B) — ${e.preview || "(empty)"}`);
+    for (const chunk of splitTG("📦 Storage:\n" + lines.join("\n"), 4000)) {
+      try { await ctx.reply(chunk, { parse_mode: "Markdown" }); }
+      catch { await ctx.reply(chunk); }
+    }
+    return;
+  }
+  if (sub === "inspect") {
+    const id = parts[1];
+    if (!id || !strIdOk(id)) return ctx.reply("⚠️ " + usage);
+    const v = strGet(id);
+    if (!v) return ctx.reply(`⚠️ No entry \`${id}\``, { parse_mode: "Markdown" });
+    for (const chunk of splitTG(`📖 \`${id}\`:\n${String(v.content ?? "")}`, 4000)) {
+      try { await ctx.reply(chunk, { parse_mode: "Markdown" }); }
+      catch { await ctx.reply(chunk); }
+    }
+    return;
+  }
+  if (sub === "del") {
+    const id = parts[1];
+    if (!id || !strIdOk(id)) return ctx.reply("⚠️ " + usage);
+    if (!(id in storage)) return ctx.reply(`⚠️ No entry \`${id}\``, { parse_mode: "Markdown" });
+    delete storage[id];
+    if (!saveStorage()) return ctx.reply("❌ Save failed.");
+    return ctx.reply(`🗑 Deleted \`${id}\``, { parse_mode: "Markdown" });
+  }
+  if (sub === "rn") {
+    const id = parts[1], nid = parts[2];
+    if (!id || !nid || !strIdOk(id) || !strIdOk(nid)) return ctx.reply("⚠️ " + usage);
+    if (!(id in storage)) return ctx.reply(`⚠️ No entry \`${id}\``, { parse_mode: "Markdown" });
+    if (nid in storage && nid !== id) return ctx.reply(`⚠️ \`${nid}\` already exists — /str del it first.`, { parse_mode: "Markdown" });
+    storage[nid] = storage[id];
+    if (nid !== id) delete storage[id];
+    if (!saveStorage()) return ctx.reply("❌ Save failed.");
+    return ctx.reply(`✏️ Renamed \`${id}\` → \`${nid}\``, { parse_mode: "Markdown" });
+  }
+  if (sub === "send") {
+    const id = parts[1];
+    if (!id || !strIdOk(id)) return ctx.reply("⚠️ " + usage);
+    let text = raw.slice(4 + id.length).trim();
+    if (!text) {
+      const rep = ctx.message?.reply_to_message;
+      text = rep?.text || rep?.caption || "";
+      if (rep && !text) {
+        const kind = kindOf(rep);
+        if (kind && kind !== "text" && kind !== "caption") {
+          try {
+            const media = await loadRepliedMedia(ctx);
+            if (media) text = media.extraText;
+          } catch {}
+        }
+      }
+      if (!text.trim()) return ctx.reply("⚠️ Nothing to store — give text or reply to a message/file.\n" + usage);
+    }
+    if (text.length > 50000) return ctx.reply("⚠️ Text too long (max 50000 chars).");
+    storage[id] = { content: text, updated: Date.now() };
+    if (!saveStorage()) return ctx.reply("❌ Save failed.");
+    return ctx.reply(`💾 Stored \`${id}\` (${Buffer.byteLength(text, "utf8")} bytes)`, { parse_mode: "Markdown" });
+  }
+  return ctx.reply("⚠️ " + usage);
+});
 bot.command("chatid", async (ctx) => {
   const c = ctx.chat || {};
   let extra = "";
@@ -1490,7 +1636,7 @@ for (const cmd of GROUP_CMDS) {
 bot.on("text", async (ctx) => {
   const text = ctx.message.text || "";
   if (ctx.chat?.type === "private") {
-    if (/^\/(talk|t|new|model|id|chatid|start|help|adduser|deluser|users|img|forget|apis|addapi|delapi)(@\w+)?(\s|$)/i.test(text.trim())) return;
+    if (/^\/(talk|t|new|model|id|chatid|start|help|adduser|deluser|users|img|forget|apis|addapi|delapi|str)(@\w+)?(\s|$)/i.test(text.trim())) return;
 
     if (hasRepliedMedia(ctx.message?.reply_to_message)) {
       try {
