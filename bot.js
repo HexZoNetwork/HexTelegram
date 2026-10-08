@@ -33,6 +33,7 @@ function ensureJson(filePath, fallback) {
 }
 
 const STORAGE_PATH = path.join(__dirname, "storage.json");
+const HISTORY_PATH = path.join(__dirname, "history.json");
 let storage = ensureJson(STORAGE_PATH, {});
 function saveStorage() {
   try { fs.writeFileSync(STORAGE_PATH, JSON.stringify(storage, null, 2) + "\n"); return true; }
@@ -140,7 +141,7 @@ const GROUP_CMDS = (config.group?.commands || ["talk", "t"]).map((s) => s.toLowe
 const GROUP_PREFIXES = config.group?.prefixes || ["=", "~", "|"];
 
 const bot = new Telegraf(config.telegramToken, { telegram: { agent: ipv4Agent } });
-const conversations = new Map();
+const conversations = loadHistory();
 let BOT_USERNAME = "";
 let BOT_ID = 0;
 let activeApi = 0;
@@ -426,10 +427,50 @@ function shellAllowed(cmd) {
   return null;
 }
 
+const TOOL_USAGE_EXAMPLES = {
+  file_write: `file_write({"path": "/tmp/note.txt", "content": "hello"}) — path must be an absolute file path, content the text to write`,
+  file_read: `file_read({"path": "/tmp/note.txt"}) — path must be an absolute file path`,
+  file_list: `file_list({"path": "/home/hex/bots"}) — path must be a directory`,
+  shell_exec: `shell_exec({"command": "ls -la", "workDir": "/home/hex/bots"}) — command is required`,
+  web_fetch: `web_fetch({"url": "https://example.com"})`,
+  web_search: `web_search({"query": "telegram bot api", "max": 5})`,
+  web_check: `web_check({"url": "https://example.com"})`,
+  web_screenshot: `web_screenshot({"url": "https://example.com"})`,
+  calc: `calc({"expression": "(2+3)*4"})`,
+  get_time: `get_time({}) or get_time({"timezone": "UTC"})`,
+  sysinfo: `sysinfo({})`,
+  store_save: `store_save({"id": "note1", "content": "remember this"})`,
+  store_read: `store_read({"id": "note1"})`,
+  store_list: `store_list({})`,
+};
+function toolUsageHint(name) {
+  if (TOOL_USAGE_EXAMPLES[name]) return `Usage: ${TOOL_USAGE_EXAMPLES[name]}`;
+  const def = TOOL_DEFS.find((d) => d?.function?.name === name);
+  const props = def?.function?.parameters?.properties || {};
+  const required = def?.function?.required || Object.keys(props);
+  if (!required.length) return `Usage: ${name}({}) — takes no required args`;
+  const ex = {};
+  for (const k of required) {
+    const t = props[k]?.type;
+    ex[k] = t === "number" ? 0 : t === "array" ? [] : t === "object" ? {} : `<${k}>`;
+  }
+  return `Usage: ${name}(${JSON.stringify(ex)}) — required: ${required.join(", ")}`;
+}
 async function runTool(name, args, ctx) {
   const curChat = String(ctx.chat?.id ?? ctx.from?.id ?? "");
   const chatId = (t) => String(t || curChat);
   try {
+    // Generic pre-validation: fail fast with a usage example instead of
+    // letting the call fall through to a cryptic backend error the model retries.
+    const def = TOOL_DEFS.find((d) => d?.function?.name === name);
+    const required = def?.function?.required || [];
+    const missing = required.filter((k) => {
+      const v = args?.[k];
+      return v === undefined || v === null || String(v).trim() === "";
+    });
+    if (missing.length) {
+      return `ERROR: ${name} missing required arg(s): ${missing.join(", ")}. ${toolUsageHint(name)}. Call it again WITH those args filled — never with {}. If you genuinely don't know a value (e.g. the file path), ask the user for it instead of guessing`;
+    }
     switch (name) {
       case "tg_send_message": {
         const m = await bot.telegram.sendMessage(chatId(args.chat_id), String(args.text).slice(0, 4000));
@@ -844,7 +885,57 @@ function thoughtSnippet(raw) {
 const MEMORY_PATH = path.join(__dirname, "memory.json");
 let memoryStore = ensureJson(MEMORY_PATH, {});
 function saveMemory() {
-  try { fs.writeFileSync(MEMORY_PATH, JSON.stringify(memoryStore).slice(0, 200000)); } catch {}
+  try { fs.writeFileSync(MEMORY_PATH, JSON.stringify(memoryStore).slice(0, 200000)); }
+  catch (e) { console.error("saveMemory failed:", e.message); }
+}
+let memoryDirty = false;
+function saveMemorySoon() {
+  if (memoryDirty) return;
+  memoryDirty = true;
+  setTimeout(() => { memoryDirty = false; saveMemory(); }, 2000).unref?.();
+}
+// Backfill stats for chats restored from history.json (pre-fix chats have no entry).
+for (const [cid, h] of conversations) {
+  const e = memoryStore[cid] || (memoryStore[cid] = { firstSeen: Date.now() });
+  if (!e.msgCount) e.msgCount = Array.isArray(h) ? h.length : 0;
+  if (!e.updated) e.updated = Date.now();
+}
+if (conversations.size) saveMemorySoon();
+// Chat history persisted to disk so restarts keep context (was RAM-only).
+function loadHistory() {
+  const raw = ensureJson(HISTORY_PATH, {});
+  const map = new Map();
+  for (const [k, v] of Object.entries(raw)) {
+    if (Array.isArray(v) && v.length) map.set(Number(k) || k, v);
+  }
+  return map;
+}
+let historyDirty = false;
+function saveHistory() {
+  historyDirty = false;
+  try {
+    const obj = {};
+    for (const [k, v] of conversations) {
+      // Trim each entry for disk: drop base64, cap text length.
+      obj[k] = v.slice(-(config.maxHistory ?? 30)).map((m) => {
+        let c = m.content;
+        if (Array.isArray(c)) {
+          c = c.map((p) => (p && p.type === "image_url")
+            ? { type: "text", text: "[earlier image — already described above, do not re-fetch]" }
+            : (p && p.type === "text" ? { type: "text", text: String(p.text || "").slice(0, 2000) } : p));
+        } else if (typeof c === "string") {
+          c = c.slice(0, 4000);
+        }
+        return { role: m.role, content: c, ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}), ...(m.tool_call_id ? { tool_call_id: m.tool_call_id, name: m.name } : {}) };
+      });
+    }
+    fs.writeFileSync(HISTORY_PATH, JSON.stringify(obj).slice(0, 500000));
+  } catch (e) { console.error("saveHistory failed:", e.message); }
+}
+function saveHistorySoon() {
+  if (historyDirty) return;
+  historyDirty = true;
+  setTimeout(() => { if (historyDirty) saveHistory(); }, 2000).unref?.();
 }
 async function summarizeTexts(texts, lang = "same language") {
   try {
@@ -880,6 +971,18 @@ function pushHistory(chatId, role, content) {
   h.push({ role, content: scrubVision(content) });
   const max = config.maxHistory ?? 30;
   while (h.length > max) h.shift();
+  saveHistorySoon();
+
+  // Per-chat memory stats from message 1 — memory.json is never {} for an
+  // active chat, even before the 16-entry summarize threshold is reached.
+  const plain = typeof content === "string" ? content
+    : Array.isArray(content) ? content.filter((p) => p?.type === "text").map((p) => p.text).join("\n") : "";
+  const entry = memoryStore[chatId] || (memoryStore[chatId] = { firstSeen: Date.now() });
+  entry.msgCount = (entry.msgCount || 0) + 1;
+  entry.updated = Date.now();
+  const snippet = plain.replace(/\s+/g, " ").trim().slice(0, 120);
+  if (snippet) entry.lastMsg = snippet;
+  saveMemorySoon();
 
   const keep = config.memory?.recentKeep ?? 12;
   if (h.length > keep + 4) {
@@ -892,8 +995,8 @@ function pushHistory(chatId, role, content) {
     }).join("\n");
     summarizeTexts(txt).then((s) => {
       if (!s) return;
-      const prev = memoryStore[chatId]?.summary || "";
-      memoryStore[chatId] = { summary: `${prev}\n${s}`.trim().slice(-1500), updated: Date.now() };
+      const prev = memoryStore[chatId] || {};
+      memoryStore[chatId] = { ...prev, summary: `${prev.summary || ""}\n${s}`.trim().slice(-1500), updated: Date.now() };
       saveMemory();
     }).catch(() => {});
   }
@@ -1019,6 +1122,8 @@ async function handlePrompt(chatId, userContent, ctx) {
   const messages = [{ role: "system", content: buildSystem(memSummary) }, ...conversations.get(chatId)];
   const hardCap = config.maxToolRounds;
   let emptyRetries = 0;
+  const failStreak = { key: null, count: 0 };
+  let blockedSig = null; // tool+args the breaker has forbidden for this turn
   const mySeq = ++reqCounter;
   activeReq.set(chatId, mySeq);
   const isStale = () => activeReq.get(chatId) !== mySeq;
@@ -1069,30 +1174,49 @@ async function handlePrompt(chatId, userContent, ctx) {
       const msg1 = String(e.message || e);
       dbg("round error:", msg1.slice(0, 200));
 
-      const providerDown = /API 50[234]|Bad gateway|terminated|stalled|empty stream/i.test(msg1);
-      const waits = providerDown ? [8000, 20000] : [2000];
-      let lastErr = e;
-      for (let ri = 0; ri <= waits.length; ri++) {
-        const useStream = ri < 2;
-        if (ri > 0) {
-          await show(`⚠️ ${msg1.slice(0, 160)}\n${providerDown ? "Provider is down — " : ""}retry ${ri}/${waits.length} in ${waits[ri - 1] / 1000}s…`);
-          await sleep(waits[ri - 1]);
-          if (isStale()) break;
-        }
+      // Retriable = transport/provider outage (keep trying) vs a hard error (fail fast).
+      const retriable = /API 50[234]|Bad gateway|terminated|stalled|empty stream|fetch failed|unreachable|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ECONNRESET|socket hang up|network|timeout|TLS|SSL|502|503|504/i.test(msg1);
+      if (!retriable) {
+        // One fast retry for transient blips, then fail loudly.
         try {
-          r = await chatStream(messages, TOOL_DEFS, null, undefined, useStream, noteThought);
-          lastErr = null;
-          break;
-        } catch (e2) { lastErr = e2; dbg(`retry ${ri} failed:`, String(e2.message || e2).slice(0, 160)); }
-      }
-      if (lastErr || isStale()) {
-        if (isStale()) break;
-        dbg("all retries failed:", String(lastErr.message || lastErr).slice(0, 200));
-        clearInterval(liveTicker);
-        if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
-        await show(`❌ ${providerDown ? "AI provider is down (502 Bad Gateway from host). Try again in a few minutes." : "Request failed: " + String(lastErr.message || lastErr).slice(0, 250)}`);
-
-        return;
+          await sleep(2000);
+          if (isStale()) break;
+          r = await chatStream(messages, TOOL_DEFS, null, undefined, false, noteThought);
+        } catch (e2) {
+          dbg("non-retriable, giving up:", String(e2.message || e2).slice(0, 160));
+          clearInterval(liveTicker);
+          if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
+          await show(`❌ Request failed: ${String(e2.message || e2).slice(0, 250)}`);
+          return;
+        }
+      } else {
+        // Persistent retry with growing backoff — never give up after 1-2 tries.
+        // Total budget configurable (default 10 min), abort only if superseded.
+        const maxWaitMs = (config.apiRetryMaxSec ?? 600) * 1000;
+        const waits = [2000, 5000, 10000, 20000, 30000, 60000];
+        const tRetry0 = Date.now();
+        let attempt = 0, lastErr = e, ok = false;
+        while (Date.now() - tRetry0 < maxWaitMs) {
+          const wait = waits[Math.min(attempt, waits.length - 1)];
+          attempt++;
+          await show(`⚠️ API unreachable (${msg1.slice(0, 120)})\nRetry ${attempt} in ${wait / 1000}s… (keeping your request, no need to resend)`);
+          await sleep(wait);
+          if (isStale()) break;
+          try {
+            r = await chatStream(messages, TOOL_DEFS, null, undefined, attempt < 2, noteThought);
+            lastErr = null; ok = true;
+            dbg(`retry ${attempt} succeeded`);
+            break;
+          } catch (e2) { lastErr = e2; dbg(`retry ${attempt} failed:`, String(e2.message || e2).slice(0, 160)); }
+        }
+        if (!ok || isStale()) {
+          if (isStale()) break;
+          dbg("retry budget exhausted:", String(lastErr?.message || lastErr).slice(0, 200));
+          clearInterval(liveTicker);
+          if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
+          await show(`❌ API still unreachable after ${Math.round((Date.now() - tRetry0) / 1000)}s: ${String(lastErr?.message || lastErr).slice(0, 200)}\nYour message is kept — send anything to retry, or try again in a few minutes.`);
+          return;
+        }
       }
     }
     if (isStale()) { dbg("abort after API (superseded)"); break; }
@@ -1108,7 +1232,26 @@ async function handlePrompt(chatId, userContent, ctx) {
     }
     if (r.toolCalls?.length) {
       dbg(`round ${round}: tools`, r.toolCalls.map((t) => t.function?.name).join(","));
+      // Coach, don't forbid: if the model retried the same failing call after
+      // being shown usage, skip re-executing it and finalize with guidance.
+      if (blockedSig) {
+        const retry = r.toolCalls.some((tc) => {
+          let a = {};
+          try { a = JSON.parse(tc.function?.arguments || "{}"); } catch {}
+          return `${tc.function?.name || "?"}:${JSON.stringify(a)}` === blockedSig;
+        });
+        if (retry) {
+          dbg(`breaker: model retried coached call unchanged — finalizing without re-executing`);
+          clearInterval(liveTicker);
+          if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
+          const partial = (r.content || "").trim();
+          await finalizeStream(ctx, prog, (partial ? partial + "\n\n" : "") + "⚠️ That step keeps failing with the same arguments — here's how it works, tell me the missing piece and I'll run it.");
+          return;
+        }
+        blockedSig = null;
+      }
       messages.push({ role: "assistant", content: r.content || "", tool_calls: r.toolCalls });
+      let brokeLoop = false;
       for (const tc of r.toolCalls) {
         if (isStale()) break;
         const tname = tc.function?.name || "?";
@@ -1127,7 +1270,27 @@ async function handlePrompt(chatId, userContent, ctx) {
         st.status = "Reviewing result";
         await showProg();
         messages.push({ role: "tool", tool_call_id: tc.id, name: tname, content: String(result).slice(0, 8000) });
+        // Coach on repeat failure: same tool + same args failing = model is
+        // stuck. Show it the correct usage with a concrete example so the
+        // next attempt has filled args instead of the same {} again.
+        const sig = `${tname}:${JSON.stringify(args)}`;
+        const errLine = String(result).split("\n")[0].slice(0, 160);
+        if (!ok) {
+          failStreak.count = (failStreak.key === sig) ? failStreak.count + 1 : 1;
+          failStreak.key = sig;
+          if (failStreak.count >= 2) {
+            dbg(`breaker: ${tname} failed ${failStreak.count}x with identical args — coaching usage`);
+            blockedSig = sig;
+            messages.push({ role: "user", content: `SYSTEM: your last ${tname} call failed like this: ${errLine}. ${toolUsageHint(tname)}. Now call ${tname} again WITH correct arguments filled in (use a sensible path if the user didn't give one, e.g. /tmp/output.txt). Only if you truly cannot guess a required value, ask the user for it and end your turn with NO further tool calls.` });
+            brokeLoop = true;
+            break;
+          }
+        } else {
+          failStreak.key = null;
+          failStreak.count = 0;
+        }
       }
+      if (brokeLoop) continue; // one final model turn to explain, then it ends
       if (isStale()) { dbg("abort after tools (superseded)"); break; }
       st.action = "💭 Thinking";
       st.status = "Composing answer";
@@ -1266,8 +1429,8 @@ Owner: /adduser • /deluser • /users • /apis • /addapi • /delapi • /s
     { parse_mode: "Markdown" }
   ).catch((e) => console.warn("start reply failed:", e.message));
 });
-bot.command("new", (ctx) => { conversations.delete(ctx.chat.id); ctx.reply("🧹 History cleared."); });
-bot.command("forget", (ctx) => { conversations.delete(ctx.chat.id); delete memoryStore[ctx.chat.id]; saveMemory(); ctx.reply("🧠 Memory + history cleared."); });
+bot.command("new", (ctx) => { conversations.delete(ctx.chat.id); saveHistorySoon(); ctx.reply("🧹 History cleared."); });
+bot.command("forget", (ctx) => { conversations.delete(ctx.chat.id); delete memoryStore[ctx.chat.id]; saveMemory(); saveHistorySoon(); ctx.reply("🧠 Memory + history cleared."); });
 
 
 const MODELS_CACHE_PATH = path.join(__dirname, "models_cache.json");
@@ -1427,6 +1590,7 @@ async function handleModelCallback(ctx) {
     config.model = id;
     if (!saveConfig()) { await ctx.answerCbQuery("❌ Save failed").catch(() => {}); return true; }
     conversations.clear();
+    saveHistory();
     await ack(`✅ Switched to ${shortName(id)}`);
     try {
       await ctx.editMessageText(`✅ Chat model is now \`${id}\` (history cleared for safety).\n🖼 Image: \`${(config.image && config.image.model) || "jmbot/grok-4.7"}\``,
@@ -2088,9 +2252,28 @@ bot.on("migrate_to_chat_id", (ctx) => ctx.reply("⚠️ This group upgraded to a
 
 const BOOT_DELAYS = [2000, 5000, 10000, 30000, 60000];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-process.on("unhandledRejection", (e) => console.error("unhandledRejection (kept alive):", String(e?.message || e).slice(0, 300)));
-process.on("uncaughtException", (e) => console.error("uncaughtException (kept alive):", String(e?.message || e).slice(0, 300)));
-bot.catch((e) => console.error("telegraf error (kept alive):", String(e?.message || e).slice(0, 300)));
+let fatalCount = 0;
+let fatalWindowStart = Date.now();
+function noteFatal(kind, e) {
+  const now = Date.now();
+  if (now - fatalWindowStart > 60000) { fatalWindowStart = now; fatalCount = 0; }
+  fatalCount++;
+  console.error(`${kind} (${fatalCount} in last 60s):`, String(e?.stack || e?.message || e).slice(0, 500));
+  if (fatalCount >= 10) {
+    console.error(`${kind}: too many fatals in 60s — exiting so the process manager restarts clean`);
+    try { saveHistory(); } catch {}
+    try { bot.stop("fatal"); } catch {}
+    setTimeout(() => process.exit(1), 500).unref?.();
+  }
+}
+process.on("unhandledRejection", (e) => noteFatal("unhandledRejection (kept alive)", e));
+process.on("uncaughtException", (e) => {
+  console.error("uncaughtException (state may be corrupt — exiting for a clean restart):", String(e?.stack || e?.message || e).slice(0, 500));
+  try { saveHistory(); } catch {}
+  try { bot.stop("uncaughtException"); } catch {}
+  setTimeout(() => process.exit(1), 500).unref?.();
+});
+bot.catch((e) => noteFatal("telegraf error (kept alive)", e));
 
 (async () => {
   let attempt = 0;
@@ -2137,5 +2320,5 @@ bot.catch((e) => console.error("telegraf error (kept alive):", String(e?.message
     }
   }
 })();
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+process.once("SIGINT", () => { try { saveHistory(); } catch {} bot.stop("SIGINT"); });
+process.once("SIGTERM", () => { try { saveHistory(); } catch {} bot.stop("SIGTERM"); });

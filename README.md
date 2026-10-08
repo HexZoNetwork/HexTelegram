@@ -176,7 +176,7 @@ Key details:
 * **Side notes** — `/btw` queues guidance into the live run for that chat; drained into the message list before every model round as `[SIDE NOTE ...]`; run liveness tracked via `activeReq` (cleaned on all exits).
 * **Auth** — `isAllowed(senderId)` checked FIRST on every update (groups included); strangers get silence. Owner-only gates on `/model c`, `/str`, user/API management.
 * **IPv4** — forced (`dns.setDefaultResultOrder("ipv4first")` + pinned lookup + Go `tcp4` dialer) because the host has broken IPv6.
-* **Boot** — `getMe` + `launch` retried forever (2s→60s backoff); `unhandledRejection`/`uncaughtException` logged, never crash.
+* **Boot** — `getMe` + `launch` retried forever (2s→60s backoff); `unhandledRejection`/`telegraf error` logged, kept alive up to 10/min then exit for a clean restart; `uncaughtException` exits immediately (state may be corrupt).
 * **Skills** — `SKILLS.md` loaded once; `SHORT_PROMPT` (in `bot.js`) is the hot system prompt; `read_skill(section)` fetches detail on demand to save tokens.
 
 ---

@@ -1,5 +1,6 @@
 config.json
 memory.json
+history.json
 models_cache.json
 storage.json
 node_modules/
