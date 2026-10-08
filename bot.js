@@ -53,7 +53,7 @@ const SKILLS_PATH = path.join(__dirname, "SKILLS.md");
 let SKILLS_BOOK = "";
 try { SKILLS_BOOK = fs.readFileSync(SKILLS_PATH, "utf8"); } catch { SKILLS_BOOK = ""; }
 const SHORT_PROMPT =
-  "You are Hexzie, the HexTelegram AI assistant by HexzoNetwork. Tools: shell_exec, file_read/write/list, get_time, calc, web_search/fetch/check/screenshot, sysinfo, tg_* (send/buttons/photo/doc/audio/video/sticker/poll/dice/location/venue/contact/mediagroup/copy/edit/delete/forward/action/get_chat/admins/member/ban/unban/restrict/promote/invite/pin/react) + tg_event (UNIVERSAL: write raw Telegraf JS yourself when NO dedicated tg_* tool fits — helpers: telegram, chat_id, me, reply) " +
+  "You are Hexzie, the HexTelegram AI assistant by HexzoNetwork. Tools: shell_exec, file_read/write/edit/list, get_time, calc, web_search/fetch/check/screenshot, sysinfo, tg_* (send/buttons/photo/doc/audio/video/sticker/poll/dice/location/venue/contact/mediagroup/copy/edit/delete/forward/action/get_chat/admins/member/ban/unban/restrict/promote/invite/pin/react) + tg_event (UNIVERSAL: write raw Telegraf JS yourself when NO dedicated tg_* tool fits — helpers: telegram, chat_id, me, reply) " +
   "Rules: (0) 'find/search/article/who is X' -> web_search FIRST, then web_fetch best hits. NEVER web_check google/duckduckgo search URLs. " +
   "(1) 'check site <url>' -> web_check first, then web_fetch/screenshot. " +
   "(2) 'chat/send id <n>' -> tg_get_chat verify, then tg_send_message; on TG ERROR warn plainly (blocked / never pressed START / no rights / flood-wait) — never claim success on error. " +
@@ -342,6 +342,7 @@ const TOOL_DEFS = [
   { type: "function", function: { name: "shell_exec", description: "Run ANY shell command (ls, ps, df, cat, grep, git, etc.). Returns stdout+stderr.", parameters: { type: "object", properties: { command: { type: "string", description: "e.g. ls -la /home/hex" }, timeoutSec: { type: "number" }, workDir: { type: "string" } }, required: ["command"] } } },
   { type: "function", function: { name: "file_read", description: "Read a text file (truncated).", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
   { type: "function", function: { name: "file_write", description: "Write/overwrite a text file.", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
+  { type: "function", function: { name: "file_edit", description: "Edit one line/section of a text file by replacing exact old_string with new_string. Fails if old_string missing or ambiguous (set replace_all=true to replace all). Much cheaper than file_write for small changes.", parameters: { type: "object", properties: { path: { type: "string" }, old_string: { type: "string" }, new_string: { type: "string" }, replace_all: { type: "boolean" } }, required: ["path", "old_string", "new_string"] } } },
   { type: "function", function: { name: "file_list", description: "List directory contents.", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
   { type: "function", function: { name: "get_time", description: "Current date/time. Optional IANA timezone.", parameters: { type: "object", properties: { timezone: { type: "string" } } } } },
   { type: "function", function: { name: "calc", description: "Evaluate math expression.", parameters: { type: "object", properties: { expression: { type: "string" } }, required: ["expression"] } } },
@@ -429,6 +430,7 @@ function shellAllowed(cmd) {
 
 const TOOL_USAGE_EXAMPLES = {
   file_write: `file_write({"path": "/tmp/note.txt", "content": "hello"}) — path must be an absolute file path, content the text to write`,
+  file_edit: `file_edit({"path": "/tmp/note.txt", "old_string": "old line", "new_string": "new line"}) — replaces exact old_string with new_string (1 match required unless replace_all=true)`,
   file_read: `file_read({"path": "/tmp/note.txt"}) — path must be an absolute file path`,
   file_list: `file_list({"path": "/home/hex/bots"}) — path must be a directory`,
   shell_exec: `shell_exec({"command": "ls -la", "workDir": "/home/hex/bots"}) — command is required`,
@@ -460,8 +462,6 @@ async function runTool(name, args, ctx) {
   const curChat = String(ctx.chat?.id ?? ctx.from?.id ?? "");
   const chatId = (t) => String(t || curChat);
   try {
-    // Generic pre-validation: fail fast with a usage example instead of
-    // letting the call fall through to a cryptic backend error the model retries.
     const def = TOOL_DEFS.find((d) => d?.function?.name === name);
     const required = def?.function?.required || [];
     const missing = required.filter((k) => {
@@ -809,6 +809,7 @@ function actionLabel(name, args) {
     case "shell_exec": return `💻 Exec \`${String(a.command || "").slice(0, 60)}\``;
     case "file_read": return `📖 Reading ${a.path || ""}`;
     case "file_write": return `✏️ Writing ${a.path || ""}`;
+    case "file_edit": return `✏️ Editing ${a.path || ""}`;
     case "file_list": return `📁 Listing ${a.path || ""}`;
     case "tg_send_message": return `✉️ Sending message to ${a.chat_id || "chat"}`;
     case "tg_send_buttons": return `🔘 Sending buttons`;
@@ -894,14 +895,12 @@ function saveMemorySoon() {
   memoryDirty = true;
   setTimeout(() => { memoryDirty = false; saveMemory(); }, 2000).unref?.();
 }
-// Backfill stats for chats restored from history.json (pre-fix chats have no entry).
 for (const [cid, h] of conversations) {
   const e = memoryStore[cid] || (memoryStore[cid] = { firstSeen: Date.now() });
   if (!e.msgCount) e.msgCount = Array.isArray(h) ? h.length : 0;
   if (!e.updated) e.updated = Date.now();
 }
 if (conversations.size) saveMemorySoon();
-// Chat history persisted to disk so restarts keep context (was RAM-only).
 function loadHistory() {
   const raw = ensureJson(HISTORY_PATH, {});
   const map = new Map();
@@ -916,7 +915,6 @@ function saveHistory() {
   try {
     const obj = {};
     for (const [k, v] of conversations) {
-      // Trim each entry for disk: drop base64, cap text length.
       obj[k] = v.slice(-(config.maxHistory ?? 30)).map((m) => {
         let c = m.content;
         if (Array.isArray(c)) {
@@ -973,8 +971,6 @@ function pushHistory(chatId, role, content) {
   while (h.length > max) h.shift();
   saveHistorySoon();
 
-  // Per-chat memory stats from message 1 — memory.json is never {} for an
-  // active chat, even before the 16-entry summarize threshold is reached.
   const plain = typeof content === "string" ? content
     : Array.isArray(content) ? content.filter((p) => p?.type === "text").map((p) => p.text).join("\n") : "";
   const entry = memoryStore[chatId] || (memoryStore[chatId] = { firstSeen: Date.now() });
@@ -1123,7 +1119,7 @@ async function handlePrompt(chatId, userContent, ctx) {
   const hardCap = config.maxToolRounds;
   let emptyRetries = 0;
   const failStreak = { key: null, count: 0 };
-  let blockedSig = null; // tool+args the breaker has forbidden for this turn
+  let blockedSig = null;
   const mySeq = ++reqCounter;
   activeReq.set(chatId, mySeq);
   const isStale = () => activeReq.get(chatId) !== mySeq;
@@ -1174,10 +1170,8 @@ async function handlePrompt(chatId, userContent, ctx) {
       const msg1 = String(e.message || e);
       dbg("round error:", msg1.slice(0, 200));
 
-      // Retriable = transport/provider outage (keep trying) vs a hard error (fail fast).
       const retriable = /API 50[234]|Bad gateway|terminated|stalled|empty stream|fetch failed|unreachable|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ECONNRESET|socket hang up|network|timeout|TLS|SSL|502|503|504/i.test(msg1);
       if (!retriable) {
-        // One fast retry for transient blips, then fail loudly.
         try {
           await sleep(2000);
           if (isStale()) break;
@@ -1190,8 +1184,6 @@ async function handlePrompt(chatId, userContent, ctx) {
           return;
         }
       } else {
-        // Persistent retry with growing backoff — never give up after 1-2 tries.
-        // Total budget configurable (default 10 min), abort only if superseded.
         const maxWaitMs = (config.apiRetryMaxSec ?? 600) * 1000;
         const waits = [2000, 5000, 10000, 20000, 30000, 60000];
         const tRetry0 = Date.now();
@@ -1232,8 +1224,6 @@ async function handlePrompt(chatId, userContent, ctx) {
     }
     if (r.toolCalls?.length) {
       dbg(`round ${round}: tools`, r.toolCalls.map((t) => t.function?.name).join(","));
-      // Coach, don't forbid: if the model retried the same failing call after
-      // being shown usage, skip re-executing it and finalize with guidance.
       if (blockedSig) {
         const retry = r.toolCalls.some((tc) => {
           let a = {};
@@ -1270,9 +1260,6 @@ async function handlePrompt(chatId, userContent, ctx) {
         st.status = "Reviewing result";
         await showProg();
         messages.push({ role: "tool", tool_call_id: tc.id, name: tname, content: String(result).slice(0, 8000) });
-        // Coach on repeat failure: same tool + same args failing = model is
-        // stuck. Show it the correct usage with a concrete example so the
-        // next attempt has filled args instead of the same {} again.
         const sig = `${tname}:${JSON.stringify(args)}`;
         const errLine = String(result).split("\n")[0].slice(0, 160);
         if (!ok) {
@@ -1290,7 +1277,7 @@ async function handlePrompt(chatId, userContent, ctx) {
           failStreak.count = 0;
         }
       }
-      if (brokeLoop) continue; // one final model turn to explain, then it ends
+      if (brokeLoop) continue;
       if (isStale()) { dbg("abort after tools (superseded)"); break; }
       st.action = "💭 Thinking";
       st.status = "Composing answer";

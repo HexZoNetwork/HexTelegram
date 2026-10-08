@@ -144,6 +144,76 @@ func toolFileWrite(args map[string]any) string {
 	}
 	return "wrote " + p
 }
+func toolFileEdit(args map[string]any) string {
+	p := str(args, "path", "")
+	oldS := str(args, "old_string", "")
+	if oldS == "" {
+		oldS = str(args, "oldString", "")
+	}
+	if oldS == "" {
+		oldS = str(args, "old", "")
+	}
+	newS := str(args, "new_string", "")
+	if args["new_string"] == nil && args["newString"] != nil {
+		newS = str(args, "newString", "")
+	}
+	if args["new_string"] == nil && args["newString"] == nil && args["new"] != nil {
+		newS = str(args, "new", "")
+	}
+	_, hasNew := args["new_string"]
+	if !hasNew {
+		_, hasNew = args["newString"]
+	}
+	if !hasNew {
+		_, hasNew = args["new"]
+	}
+	replaceAll := false
+	if v, ok := args["replace_all"]; ok {
+		if b, ok := v.(bool); ok {
+			replaceAll = b
+		} else if s, ok := v.(string); ok && (s == "true" || s == "1") {
+			replaceAll = true
+		}
+	}
+	if v, ok := args["replaceAll"]; ok && !replaceAll {
+		if b, ok := v.(bool); ok {
+			replaceAll = b
+		}
+	}
+	if p == "" {
+		return "ERROR: empty path"
+	}
+	if oldS == "" {
+		return "ERROR: empty old_string — provide the exact text to replace"
+	}
+	if !hasNew {
+		return "ERROR: missing new_string — provide replacement text (empty string allowed for deletion)"
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "ERROR: " + err.Error()
+	}
+	content := string(b)
+	count := strings.Count(content, oldS)
+	if count == 0 {
+		return "ERROR: old_string not found in " + p
+	}
+	if count > 1 && !replaceAll {
+		return fmt.Sprintf("ERROR: old_string found %d times in %s — provide more surrounding context to make it unique, or set replace_all=true", count, p)
+	}
+	if replaceAll {
+		content = strings.ReplaceAll(content, oldS, newS)
+	} else {
+		content = strings.Replace(content, oldS, newS, 1)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		return "ERROR: " + err.Error()
+	}
+	if replaceAll {
+		return fmt.Sprintf("edited %s: replaced %d occurrence(s)", p, count)
+	}
+	return fmt.Sprintf("edited %s: 1 occurrence replaced", p)
+}
 func toolFileList(args map[string]any) string {
 	p := str(args, "path", "/")
 	es, err := os.ReadDir(p)
@@ -735,6 +805,8 @@ func main() {
 		fmt.Println(toolFileRead(c.Args))
 	case "file_write":
 		fmt.Println(toolFileWrite(c.Args))
+	case "file_edit":
+		fmt.Println(toolFileEdit(c.Args))
 	case "file_list":
 		fmt.Println(toolFileList(c.Args))
 	case "get_time":
