@@ -456,7 +456,6 @@ if [ -f config.json ]; then
         if(e("N_KEY")) p.apiKey=e("N_KEY").trim();
         if(e("N_MODEL")) p.model=e("N_MODEL").trim();
         p.debugLog=(e("N_DBG")==="y");
-        // keep apis[] in sync with baseURL/apiKey (what the bot actually dials)
         const base=p.baseURL||(()=>{try{return require("./config.json").baseURL}catch{return""}})();
         const key=p.apiKey||(()=>{try{return require("./config.json").apiKey}catch{return""}})();
         if(base&&key){ let c={}; try{c=require("./config.json")}catch{}; const pool=Array.isArray(c.apis)?c.apis:[];
