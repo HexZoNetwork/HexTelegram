@@ -58,19 +58,23 @@ Requirements: **Node 18+**, **Go 1.21+**, optional **chromium** (for `web_screen
 
 ## Config (`config.json`)
 
-Only 9 keys:
+Core keys:
 
 | Key | Required | Default | What |
 |---|---|---|---|
 | `telegramToken` | yes | — | From [@BotFather](https://t.me/BotFather) |
 | `ownerUserId` | yes | — | Your numeric Telegram ID (ask the bot `/id`) |
 | `allowedUserIds` | no | `[]` | Extra user IDs, e.g. `[111, 222]` |
-| `baseURL` | yes | — | OpenAI-compatible endpoint, e.g. `https://api.openai.com/v1` |
-| `apiKey` | yes | — | API key for `baseURL` |
-| `model` | no | `jmbot/mimo-v2.6-flash` | Chat model (change live with `/model c`) |
+| `baseURL` | yes* | — | OpenAI-compatible endpoint (*only needed for `apikey` provider) |
+| `apiKey` | yes* | — | API key for `baseURL` (*only needed for `apikey` provider) |
+| `model` | no | `jmbot/mimo-v2.6-flash` | Chat model for apikey (change live with `/model c`) |
 | `systemPrompt` | no | `""` | Extra persona text, prepended to system prompt |
 | `temperature` | no | `0.7` | Sampling temperature |
 | `maxTokens` | no | `2048` | Max completion tokens |
+| `auth.provider` | no | `apikey` | `apikey` \| `antigravity` \| `chatgpt` (switch live with `/login use`) |
+| `auth.antigravity.model` | no | `gemini-3-pro-high` | Model when provider=antigravity |
+| `auth.chatgpt.model` | no | `gpt-4o-mini` | Model when provider=chatgpt |
+| `auth.chatgpt.baseURL` | no | `https://api.openai.com/v1` | Endpoint when provider=chatgpt |
 
 **Filesystem scope:** shell/file tools run from `/` by default. Run the bot as root for full control, or pass `workDir` per `shell_exec` call to scope it:
 
@@ -108,6 +112,23 @@ Everything else (streaming interval, group triggers, history window, timeouts) u
 | `/apis` | List API pool (★ = active) |
 | `/addapi <url> <key>` | Live-test + add API endpoint |
 | `/delapi <n>` | Remove API #n (keeps at least one) |
+| `/login` | Auth status + provider buttons (apikey/antigravity/chatgpt) |
+| `/login antigravity` | Google OAuth → Antigravity gateway (PKCE + copy-paste callback) |
+| `/login chatgpt` | ChatGPT OAuth (experimental) |
+| `/login code <code>` | Paste OAuth code after browser login |
+| `/login callback <url>` | Paste full localhost redirect URL |
+| `/login token <tok>` | ChatGPT manual token paste |
+| `/login use <provider>` | Switch provider (apikey/antigravity/chatgpt) |
+| `/login status` | Accounts + active provider |
+| `/login logout [all]` | Remove OAuth accounts → back to apikey |
+| `/logout` | Same as `/login logout` |
+| `/plugin` (reply to .js/.zip) | Install plugin from replied file |
+| `/plugin <url> [id]` | Install plugin from URL |
+| `/pl ls` | List plugins |
+| `/pl info <id>` | Plugin details |
+| `/pl reload` | Reload all plugins |
+| `/pl on <id>` / `/pl off <id>` | Enable / disable plugin |
+| `/pl del <id>` | Delete plugin + files |
 | `/str ls` | List AI storage entries (id + size + preview) |
 | `/str inspect <id>` | View one storage entry |
 | `/str send <id> <text>` (or reply to a message/file) | Save text into AI storage |
@@ -156,14 +177,23 @@ Local file paths (e.g. `/tmp/shot-….png`) work for photo/document sends.
 ## How it works
 
 ```
-Telegram update → Telegraf middleware (stop-signal, auth by sender ID)
+Telegram update → Telegraf middleware (stop-signal, auth by sender ID, plugin dispatcher)
   → event handler (text/photo/doc/voice/callback/…)
   → processText: builds [Context:] block (chat/sender/reply/forward IDs)
   → handlePrompt: agentic loop (max 8 rounds)
-      → chatStream: POST {model, messages, tools} to active API (SSE)
+      → chatStream: routes by provider —
+          apikey: POST {model, messages, tools} to active API (SSE)
+          antigravity: translate OpenAI → Gemini contents, call cloudcode-pa gateway (SSE)
+          chatgpt: Bearer OAuth token against OpenAI-compatible endpoint (SSE)
       → on tool_calls: show progress label → runTool → push result → re-query
       → on text: finalizeStream (edit "💭 Thinking…" into Markdown answer)
 ```
+
+Key details:
+
+* **Auth providers** — `config.auth.provider`: `apikey` (legacy pool), `antigravity` (Google OAuth PKCE → Antigravity Unified Gateway, full port of opencode-antigravity-auth translation: PKCE, refresh, project discovery, Gemini `contents` mapping, schema cleaning, SSE unwrap, multi-account rotation), `chatgpt` (experimental OAuth PKCE + manual token paste → Bearer against OpenAI-compatible `auth.chatgpt.baseURL`). Switch live with `/login use <provider>`; tokens in `auth.json` (gitignored). ⚠️ Unofficial OAuth carries the same ToS/account risk as the upstream plugin.
+* **Plugins** — `plugins/` + `plugins.json` registry, loaded via `plugins.js` dispatcher middleware (dynamic, no Telegraf unregister needed). Install: reply to `.js` (≤500KB) or `.zip` (≤5MB, `index.js` at root) with `/plugin`, or `/plugin <url> [id]`. Manage: `/pl ls|info|reload|on|off|del`. Only owner can install/manage; any allowed user can run plugin commands. Safety scan flags env/secret/network/shell patterns on install.
+* **SDK** — repo `HexZoNetwork/htsdk` (non-commercial HXZ, also at `/home/hex/htsdk`): `definePlugin`, `createAgent`, `defineProvider`, examples (`hello-plugin.js`, `custom-agent.js`, `antigravity-provider.js`). Install with no publish step: `npm install github:HexZoNetwork/htsdk`, then `require("htsdk")`. Copy a plugin file, send it to the bot, reply `/plugin` to install.
 
 Key details:
 
@@ -186,10 +216,17 @@ Key details:
 ```
 HexTelegram/
 ├── bot.js                      ← Bot entry: streaming, agentic loop, all handlers
+├── auth.js                     ← OAuth providers (antigravity full clone + chatgpt starter)
+├── plugins.js                  ← Plugin loader/dispatcher (+ /plugin /pl handlers in bot.js)
+├── plugins/
+│   ├── hello.js.example        ← Example plugin (reply-install with /plugin)
+│   └── .gitkeep
+├── auth.json                   ← OAuth tokens (gitignored, created on /login)
+├── plugins.json                ← Plugin registry (gitignored)
 ├── tools-go/
 │   └── main.go                 ← Go tool runner
 ├── tools                       ← Built binary
-├── config.json                 ← Your secrets
+├── config.json                 ← Your secrets (+ auth.provider)
 ├── example.config.json         ← Template config
 ├── SKILLS.md                   ← AI skill book
 ├── memory.json                 ← Auto-summary memory
@@ -198,6 +235,11 @@ HexTelegram/
 ├── text.json                   ← Tips/splashes shown in progress messages
 ├── setup.sh                    ← Install deps + build + sanity check
 └── package.json                ← Node deps (telegraf)
+
+htsdk/               ← SDK clone (repo HexZoNetwork/htsdk, non-commercial, not in this git)
+├── index.js                   ← definePlugin, createAgent, helpers (`npm install github:HexZoNetwork/htsdk`)
+├── plugin.js / auth-providers.js
+└── examples/                  ← hello-plugin, custom-agent, provider skeleton
 ```
 
 ---

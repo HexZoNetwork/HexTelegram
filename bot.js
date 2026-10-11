@@ -15,6 +15,8 @@ const ipv4Lookup = (hostname, opts, cb) => {
 const ipv4Agent = new https.Agent({ lookup: ipv4Lookup, keepAlive: true });
 const { execFile } = require("child_process");
 const { Telegraf } = require("telegraf");
+const auth = require("./auth");
+const plugins = require("./plugins");
 
 const CONFIG_PATH = path.join(__dirname, "config.json");
 const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
@@ -100,6 +102,35 @@ function saveConfig() {
   try { fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n"); return true; }
   catch (e) { console.error("saveConfig failed:", e.message); return false; }
 }
+if (!config.auth || typeof config.auth !== "object") config.auth = {};
+if (!["apikey", "antigravity", "chatgpt"].includes(config.auth.provider)) {
+  try { config.auth.provider = auth.loadAuthCached().activeProvider || "apikey"; }
+  catch { config.auth.provider = config.auth.provider || "apikey"; }
+}
+if (!config.auth.antigravity || typeof config.auth.antigravity !== "object") config.auth.antigravity = {};
+if (!config.auth.chatgpt || typeof config.auth.chatgpt !== "object") config.auth.chatgpt = {};
+if (!config.auth.antigravity.model) config.auth.antigravity.model = "gemini-3-pro-high";
+if (!config.auth.chatgpt.model) config.auth.chatgpt.model = "gpt-4o-mini";
+if (!config.auth.chatgpt.baseURL) config.auth.chatgpt.baseURL = auth.CHATGPT_DEFAULTS.baseURL;
+function currentProvider() {
+  const p = (config.auth && config.auth.provider) || "apikey";
+  return ["apikey", "antigravity", "chatgpt"].includes(p) ? p : "apikey";
+}
+function currentChatModel() {
+  const p = currentProvider();
+  if (p === "antigravity") return (config.auth.antigravity && config.auth.antigravity.model) || config.model;
+  if (p === "chatgpt") return (config.auth.chatgpt && config.auth.chatgpt.model) || config.model;
+  return config.model;
+}
+function setProvider(p) {
+  config.auth.provider = p;
+  try {
+    const a = auth.loadAuthCached();
+    a.activeProvider = p;
+    auth.persistAuth();
+  } catch {}
+  return saveConfig();
+}
 
 
 function getApiPool() {
@@ -168,9 +199,26 @@ bot.use((ctx, next) => {
   if (!uid || !isAllowed(uid)) return;
   return next();
 });
+bot.use(plugins.middleware());
 
 
 async function chatStream(messages, tools, onContent, signal, useStream = true, onThought) {
+  const prov = currentProvider();
+  if (prov === "antigravity") {
+    if (config.debugLog) console.log(`[api] antigravity model=${currentChatModel()} msgs=${messages.length} tools=${tools?.length || 0}`);
+    return auth.antigravityChat({
+      model: currentChatModel(),
+      messages,
+      tools,
+      temperature: config.temperature ?? 0.7,
+      maxTokens: config.maxTokens ?? 2048,
+      signal,
+      onContent,
+    });
+  }
+  if (prov === "chatgpt") {
+    return chatStreamChatGPT(messages, tools, onContent, signal, useStream, onThought);
+  }
   const body = {
     model: config.model,
     messages,
@@ -335,6 +383,144 @@ async function chatStream(messages, tools, onContent, signal, useStream = true, 
 
   if (!gotAny && !content && !toolByIndex.size) throw new Error("API returned empty stream (no SSE data) — retrying");
   return { content, toolCalls: [...toolByIndex.values()], finishReason, aborted };
+}
+
+async function chatStreamChatGPT(messages, tools, onContent, signal, useStream = true, onThought) {
+  const cfg = (config.auth && config.auth.chatgpt) || {};
+  const baseURL = String(cfg.baseURL || auth.CHATGPT_DEFAULTS.baseURL).replace(/\/$/, "");
+  const model = String(cfg.model || config.model || "gpt-4o-mini");
+  const a = auth.loadAuthCached();
+  const idx = a.activeIndex.chatgpt || 0;
+  let tok;
+  try {
+    const r = await auth.getValidChatGPTToken(config, idx);
+    tok = r.token;
+    a.activeIndex.chatgpt = r.index;
+    auth.persistAuth();
+  } catch (e) {
+    throw new Error(`ChatGPT: ${e.message} — run /login chatgpt first`);
+  }
+  const body = {
+    model,
+    messages,
+    temperature: config.temperature ?? 0.7,
+    max_tokens: config.maxTokens ?? 2048,
+    stream: useStream,
+  };
+  if (tools && tools.length) body.tools = tools;
+  if (config.debugLog) console.log(`[api] chatgpt model=${model} msgs=${messages.length} tools=${tools?.length || 0} via ${baseURL}`);
+  const apiSec = config.apiTimeoutSec ?? 120;
+  const tctl = new AbortController();
+  const tt = setTimeout(() => tctl.abort(new Error(`API timeout after ${apiSec}s`)), apiSec * 1000);
+  const onAbort = () => tctl.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) tctl.abort(signal.reason);
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
+  const t0 = Date.now();
+  let res;
+  try {
+    res = await fetch(`${baseURL}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
+      body: JSON.stringify(body),
+      signal: tctl.signal,
+    });
+  } catch (e) {
+    clearTimeout(tt);
+    if (signal) signal.removeEventListener?.("abort", onAbort);
+    throw e;
+  }
+  if (res.status === 401) {
+    try {
+      const acc = (auth.loadAuthCached().accounts.chatgpt || [])[a.activeIndex.chatgpt || 0];
+      if (acc) {
+        await auth.refreshChatGPTAccount(config, acc);
+        auth.persistAuth();
+        res = await fetch(`${baseURL}/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${acc.access}` },
+          body: JSON.stringify(body),
+          signal: tctl.signal,
+        });
+      }
+    } catch (e) {
+      clearTimeout(tt);
+      if (signal) signal.removeEventListener?.("abort", onAbort);
+      throw new Error(`ChatGPT refresh failed: ${e.message} — /login chatgpt again`);
+    }
+  }
+  clearTimeout(tt);
+  if (signal) signal.removeEventListener?.("abort", onAbort);
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 300) || res.statusText;
+    throw new Error(`ChatGPT API ${res.status}: ${detail}`);
+  }
+  if (!useStream) {
+    const j = await res.json().catch(() => ({}));
+    const msg = (j.choices && j.choices[0] && j.choices[0].message) || {};
+    const tc = (msg.tool_calls || []).map((t, i) => ({
+      id: t.id || `call_${i}`, type: "function",
+      function: { name: (t.function && t.function.name) || "", arguments: (t.function && t.function.arguments) || "{}" },
+    }));
+    if (msg.reasoning_content && onThought) { try { onThought(String(msg.reasoning_content)); } catch {} }
+    if (config.debugLog) console.log(`[api] chatgpt non-stream done in ${Date.now() - t0}ms len=${(msg.content || "").length} tools=${tc.length}`);
+    return { content: msg.content || "", toolCalls: tc, finishReason: (j.choices && j.choices[0] && j.choices[0].finish_reason) || null, aborted: false };
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let content = "";
+  let reasoning = "";
+  const toolByIndex = new Map();
+  let finishReason = null;
+  const feed = (chunk) => {
+    buf += chunk;
+    const parts = buf.split("\n");
+    buf = parts.pop();
+    for (let line of parts) {
+      line = line.trim();
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      let ev;
+      try { ev = JSON.parse(data); } catch { continue; }
+      const choice = ev.choices?.[0];
+      if (!choice) continue;
+      const d = choice.delta || {};
+      if (choice.finish_reason) finishReason = choice.finish_reason;
+      if (typeof d.content === "string" && d.content) {
+        content += d.content;
+        if (onContent) { try { onContent(content); } catch {} }
+      }
+      if (typeof d.reasoning_content === "string" && d.reasoning_content) {
+        reasoning += d.reasoning_content;
+        if (onThought) { try { onThought(reasoning); } catch {} }
+      }
+      for (const tc of d.tool_calls || []) {
+        const i = tc.index ?? 0;
+        if (!toolByIndex.has(i)) toolByIndex.set(i, { id: "", type: "function", function: { name: "", arguments: "" } });
+        const cur = toolByIndex.get(i);
+        if (tc.id) cur.id = tc.id;
+        if (tc.type) cur.type = tc.type;
+        if (tc.function?.name) cur.function.name += tc.function.name;
+        if (typeof tc.function?.arguments === "string") cur.function.arguments += tc.function.arguments;
+      }
+    }
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) feed(dec.decode(value, { stream: true }));
+      if (done) break;
+    }
+    feed(dec.decode());
+  } catch (e) {
+    if (signal?.aborted || tctl.signal.aborted) return { content, toolCalls: [...toolByIndex.values()], finishReason, aborted: true };
+    throw e;
+  }
+  if (config.debugLog) console.log(`[api] chatgpt stream done in ${Date.now() - t0}ms len=${content.length} tools=${toolByIndex.size}`);
+  return { content, toolCalls: [...toolByIndex.values()], finishReason, aborted: false };
 }
 
 
@@ -789,6 +975,13 @@ async function runTool(name, args, ctx) {
   });
 }
 
+try {
+  const _pl = plugins.loadAll(bot, config, pluginApiExtras());
+  if (config.debugLog) console.log(`[plugins] loaded ok=${_pl.ok} fail=${_pl.fail} total=${_pl.total}`);
+} catch (e) {
+  console.warn("[plugins] initial load failed:", e.message);
+}
+
 
 const TEXT_PATH = path.join(__dirname, "text.json");
 let TEXT_BANK = ensureJson(TEXT_PATH, { tips: [], splashes: [] });
@@ -937,18 +1130,11 @@ function saveHistorySoon() {
 }
 async function summarizeTexts(texts, lang = "same language") {
   try {
-    const res = await fetch(apiUrl(activeApi, "/chat/completions"), {
-      method: "POST",
-      headers: apiHeaders(activeApi),
-      body: JSON.stringify({
-        model: config.summaryModel || config.model,
-        messages: [{ role: "user", content: `Summarize this chat history in ONE short paragraph (${lang}), keep facts/names/ids/URLs/decisions, drop chit-chat. Max 120 words:\n\n${texts.slice(-12000)}` }],
-        temperature: 0.3, max_tokens: 300, stream: false,
-      }),
-    });
-    if (!res.ok) return "";
-    const j = await res.json();
-    return (j.choices?.[0]?.message?.content || "").trim().slice(0, 1000);
+    const r = await chatStream(
+      [{ role: "user", content: `Summarize this chat history in ONE short paragraph (${lang}), keep facts/names/ids/URLs/decisions, drop chit-chat. Max 120 words:\n\n${texts.slice(-12000)}` }],
+      null, null, undefined, false
+    );
+    return (r.content || "").trim().slice(0, 1000);
   } catch { return ""; }
 }
 function scrubVision(content) {
@@ -1322,7 +1508,7 @@ function extractGroupPrompt(ctx, rawText) {
     if (q.trim()) return { prompt: q.trim(), via: "/" + c.cmd + "+rep" };
     return { prompt: "", via: "/" + c.cmd, empty: true };
   }
-  if (c && ["new", "model", "id", "chatid", "start", "help", "adduser", "deluser", "users", "img", "forget", "apis", "addapi", "delapi", "str", "btw"].includes(c.cmd)) return null;
+  if (c && ["new", "model", "id", "chatid", "start", "help", "adduser", "deluser", "users", "img", "forget", "apis", "addapi", "delapi", "str", "btw", "login", "logout", "plugin", "pl"].includes(c.cmd)) return null;
 
   if (GROUP_PREFIXES.includes(text[0])) {
     const rest = text.slice(1).trim();
@@ -1406,13 +1592,13 @@ async function processText(ctx, text, imageUrl) {
 
 bot.start((ctx) => {
   ctx.reply(
-    `🤖 Hi! I'm *Hexzie* (*${config.model}*) — HexTelegram by HexzoNetwork.
+    `🤖 Hi! I'm *Hexzie* (*${currentChatModel()}* [\`${currentProvider()}\`]) — HexTelegram by HexzoNetwork.
 
 Just send me a message — shell, files, websites, images, Telegram tools.
 
 Commands: /new • /model • /id • /chatid • /forget • /btw
 Group triggers: /talk <q> • /t <q> • \`=\` \`~\` \`|\` • @mention • reply-to-me
-Owner: /adduser • /deluser • /users • /apis • /addapi • /delapi • /str`,
+Owner: /adduser • /deluser • /users • /apis • /addapi • /delapi • /str • /login • /plugin • /pl`,
     { parse_mode: "Markdown" }
   ).catch((e) => console.warn("start reply failed:", e.message));
 });
@@ -1423,7 +1609,25 @@ bot.command("forget", (ctx) => { conversations.delete(ctx.chat.id); delete memor
 const MODELS_CACHE_PATH = path.join(__dirname, "models_cache.json");
 const MDL_PER_PAGE = 9;
 const shortName = (id) => String(id).replace(/^jmbot\//, "");
+const OAUTH_MODEL_LISTS = {
+  antigravity: [
+    "gemini-3-pro-high", "gemini-3-pro-low", "gemini-3-flash",
+    "claude-sonnet-4-6", "claude-opus-4-6-thinking",
+    "antigravity-gemini-3-pro", "antigravity-gemini-3.1-pro",
+    "antigravity-gemini-3-flash", "antigravity-claude-sonnet-4-6",
+    "antigravity-claude-opus-4-6-thinking",
+    "gemini-2.5-flash", "gemini-2.5-pro",
+  ],
+  chatgpt: ["gpt-4o", "gpt-4o-mini", "o1", "o1-mini", "gpt-4.1", "gpt-4.1-mini"],
+};
 async function fetchModelIds() {
+  const prov = currentProvider();
+  if (prov === "antigravity" || prov === "chatgpt") {
+    const base = [...OAUTH_MODEL_LISTS[prov]];
+    const cur = currentChatModel();
+    if (cur && !base.includes(cur)) base.unshift(cur);
+    return base;
+  }
   const res = await fetch(apiUrl(activeApi, "/models"), {
     headers: { Authorization: `Bearer ${getApiPool()[activeApi].apiKey}` },
   });
@@ -1432,6 +1636,29 @@ async function fetchModelIds() {
   return (j.data || []).map((m) => m.id).filter(Boolean);
 }
 async function testOneModel(id, timeoutMs = 20000) {
+  const prov = currentProvider();
+  if (prov === "antigravity") {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const r = await auth.antigravityChat({
+        model: id,
+        messages: [{ role: "user", content: "hi" }],
+        tools: null, temperature: 0.3, maxTokens: 5, signal: ctl.signal,
+      });
+      return !!((r.content || "").trim() || (r.toolCalls || []).length);
+    } catch { return false; }
+    finally { clearTimeout(t); }
+  }
+  if (prov === "chatgpt") {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const r = await chatStreamChatGPT([{ role: "user", content: "hi" }], null, null, ctl.signal, false);
+      return !!((r.content || "").trim() || (r.toolCalls || []).length);
+    } catch { return false; }
+    finally { clearTimeout(t); }
+  }
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
@@ -1535,7 +1762,8 @@ bot.command("model", async (ctx) => {
     if (ctx.from?.id !== config.ownerUserId) return ctx.reply("⚠️ Only the owner can change the model.");
     return showModelPicker(ctx, 0, false, null);
   }
-  ctx.reply(`Chat: \`${config.model}\`\nImage: \`${(config.image && config.image.model) || "jmbot/grok-4.7"}\` (fallback: pollinations)\n\nOwner: /model c — change with buttons`,
+  const prov = currentProvider();
+  ctx.reply(`Auth: \`${prov}\` | Chat: \`${currentChatModel()}\`\nImage: \`${(config.image && config.image.model) || "jmbot/grok-4.7"}\` (fallback: pollinations)\n\nOwner: /model c — change with buttons\n/login status — auth accounts`,
     { parse_mode: "Markdown" });
 });
 async function handleModelCallback(ctx) {
@@ -1574,13 +1802,16 @@ async function handleModelCallback(ctx) {
     await ack("⏳ Testing…");
     const ok = await testOneModel(id);
     if (!ok) { await ctx.answerCbQuery("⚠️ That model just failed its test").catch(() => {}); return true; }
-    config.model = id;
+    const prov = currentProvider();
+    if (prov === "antigravity") config.auth.antigravity.model = id;
+    else if (prov === "chatgpt") config.auth.chatgpt.model = id;
+    else config.model = id;
     if (!saveConfig()) { await ctx.answerCbQuery("❌ Save failed").catch(() => {}); return true; }
     conversations.clear();
     saveHistory();
     await ack(`✅ Switched to ${shortName(id)}`);
     try {
-      await ctx.editMessageText(`✅ Chat model is now \`${id}\` (history cleared for safety).\n🖼 Image: \`${(config.image && config.image.model) || "jmbot/grok-4.7"}\``,
+      await ctx.editMessageText(`✅ Chat model is now \`${id}\` [${prov}] (history cleared for safety).\n🖼 Image: \`${(config.image && config.image.model) || "jmbot/grok-4.7"}\``,
         { parse_mode: "Markdown" });
     } catch {}
     return true;
@@ -1811,6 +2042,403 @@ bot.command("delapi", async (ctx) => {
   ctx.reply(`🗑 Deleted API \`#${n}\` (${removed.baseURL}). ${pool.length} left.`, { parse_mode: "Markdown" });
 });
 
+const LOGIN_HELP = `🔐 *Login — choose how the bot talks to AI*
+
+• \`/login\` — status + buttons
+• \`/login apikey\` — use API-key pool (/addapi)
+• \`/login antigravity\` — Google OAuth → Antigravity gateway
+• \`/login chatgpt\` — ChatGPT OAuth (experimental) or manual token
+• \`/login use <apikey|antigravity|chatgpt>\` — switch provider
+• \`/login code <code>\` — paste OAuth code after browser login
+• \`/login callback <full_redirect_url>\` — paste full localhost URL
+• \`/login token <access_token>\` — ChatGPT manual token paste
+• \`/login status\` — accounts + active provider
+• \`/login logout [antigravity|chatgpt|all]\` — remove OAuth accounts
+• \`/logout\` — same as /login logout`;
+
+function loginButtons() {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🔑 API key", callback_data: "login:apikey" },
+         { text: "🅶 Antigravity", callback_data: "login:antigravity" }],
+        [{ text: "💬 ChatGPT", callback_data: "login:chatgpt" },
+         { text: "📊 Status", callback_data: "login:status" }],
+      ],
+    },
+  };
+}
+
+async function startAntigravityLogin(ctx) {
+  const { url, verifier, state } = await auth.authorizeAntigravity();
+  const a = auth.loadAuthCached();
+  a.pending = a.pending || {};
+  a.pending.antigravity = { verifier, state, createdAt: Date.now() };
+  auth.persistAuth();
+  const msg =
+    `🅶 *Antigravity login (Google OAuth)*\n\n` +
+    `1. Open this URL in your browser and sign in with Google:\n${url}\n\n` +
+    `2. Google will redirect to \`http://localhost:51121/oauth-callback?code=...&state=...\` (the page will fail to load — that's expected).\n\n` +
+    `3. Copy the FULL redirect URL and send it back:\n\`/login callback <paste_url_here>\`\n\n` +
+    `Or copy just the \`code=\` value:\n\`/login code <code>\`\n\n` +
+    `⚠️ Unofficial OAuth (same ToS risk as opencode-antigravity-auth): Google may rate-limit or restrict accounts used this way.`;
+  try { await ctx.reply(msg, { parse_mode: "Markdown", ...loginButtons() }); }
+  catch { await ctx.reply(msg); }
+}
+
+async function startChatGPTLogin(ctx) {
+  const { url, verifier, state } = await auth.authorizeChatGPT(config);
+  const a = auth.loadAuthCached();
+  a.pending = a.pending || {};
+  a.pending.chatgpt = { verifier, state, createdAt: Date.now() };
+  auth.persistAuth();
+  const c = auth.chatgptCfg(config);
+  const msg =
+    `💬 *ChatGPT login (experimental OAuth)*\n\n` +
+    `1. Open:\n${url}\n\n` +
+    `2. After login you'll land on \`${c.redirectUri}?code=...&state=...\` (may fail to load — expected). Copy the FULL URL and send:\n\`/login callback chatgpt <paste_url_here>\`\n\n` +
+    `Alternative (manual token): open chatgpt.com in your browser devtools, copy an \`access_token\`, then:\n\`/login token <access_token>\`\n\n` +
+    `Chat endpoint: \`${c.baseURL}\` (override via config \`auth.chatgpt.baseURL\`). Model: \`${(config.auth.chatgpt && config.auth.chatgpt.model) || config.model}\``;
+  try { await ctx.reply(msg, { parse_mode: "Markdown", ...loginButtons() }); }
+  catch { await ctx.reply(msg); }
+}
+
+async function handleLoginCode(ctx, code, providerHint) {
+  code = String(code || "").trim();
+  if (!code) return ctx.reply("Usage: /login code <code> [antigravity|chatgpt]");
+  const m = code.match(/[?&]code=([^&\s]+)/);
+  if (m) code = decodeURIComponent(m[1]);
+  const a = auth.loadAuthCached();
+  const order = providerHint ? [providerHint]
+    : (a.pending && a.pending.antigravity) ? ["antigravity"]
+    : (a.pending && a.pending.chatgpt) ? ["chatgpt"]
+    : ["antigravity", "chatgpt"];
+  let lastErr = null;
+  for (const prov of order) {
+    try {
+      if (prov === "antigravity") {
+        const pend = (a.pending && a.pending.antigravity) || {};
+        const stateOrVerifier = pend.state || pend.verifier || "";
+        const acc = await auth.exchangeAntigravity(code, stateOrVerifier, "");
+        a.accounts.antigravity = a.accounts.antigravity || [];
+        const ix = acc.email ? a.accounts.antigravity.findIndex((x) => x.email === acc.email) : -1;
+        if (ix >= 0) a.accounts.antigravity[ix] = acc;
+        else a.accounts.antigravity.push(acc);
+        a.activeIndex.antigravity = ix >= 0 ? ix : a.accounts.antigravity.length - 1;
+        delete (a.pending || {}).antigravity;
+        a.activeProvider = "antigravity";
+        config.auth.provider = "antigravity";
+        auth.persistAuth();
+        saveConfig();
+        conversations.clear();
+        saveHistory();
+        return ctx.reply(`✅ Antigravity login OK: ${acc.email || "?"} (project ${acc.projectId || "?"})\nProvider → \`antigravity\` | model \`${currentChatModel()}\``, { parse_mode: "Markdown" });
+      } else {
+        const pend = (a.pending && a.pending.chatgpt) || {};
+        const verifier = pend.verifier || "";
+        const acc = await auth.exchangeChatGPT(config, code, verifier);
+        a.accounts.chatgpt = a.accounts.chatgpt || [];
+        a.accounts.chatgpt.push(acc);
+        a.activeIndex.chatgpt = a.accounts.chatgpt.length - 1;
+        delete (a.pending || {}).chatgpt;
+        a.activeProvider = "chatgpt";
+        config.auth.provider = "chatgpt";
+        auth.persistAuth();
+        saveConfig();
+        conversations.clear();
+        saveHistory();
+        return ctx.reply(`✅ ChatGPT login OK.\nProvider → \`chatgpt\` | model \`${currentChatModel()}\``, { parse_mode: "Markdown" });
+      }
+    } catch (e) { lastErr = e; }
+  }
+  return ctx.reply(`❌ Code exchange failed: ${String((lastErr && lastErr.message) || "unknown").slice(0, 300)}\nRun /login antigravity (or chatgpt) again for a fresh code.`);
+}
+
+async function handleLoginCallback(ctx, rest) {
+  rest = String(rest || "").trim();
+  if (!rest) return ctx.reply("Usage: /login callback [antigravity|chatgpt] <full_redirect_url>");
+  let providerHint = "";
+  const first = rest.split(/\s+/)[0].toLowerCase();
+  if (["antigravity", "chatgpt"].includes(first)) {
+    providerHint = first;
+    rest = rest.slice(first.length).trim();
+  }
+  let code = "", state = "";
+  try {
+    const p = auth.parseCallbackUrl(rest);
+    code = p.code; state = p.state;
+  } catch (e) {
+    return ctx.reply(`⚠️ Bad URL: ${e.message}\nPaste the FULL localhost redirect URL.`);
+  }
+  if (!code) return ctx.reply("⚠️ No `code=` in that URL — copy the full redirect URL and try again.");
+  const a = auth.loadAuthCached();
+  const order = providerHint ? [providerHint]
+    : (a.pending && a.pending.antigravity) ? ["antigravity"]
+    : (a.pending && a.pending.chatgpt) ? ["chatgpt"]
+    : ["antigravity", "chatgpt"];
+  let lastErr = null;
+  for (const prov of order) {
+    try {
+      if (prov === "antigravity") {
+        const acc = await auth.exchangeAntigravity(code, state || ((a.pending || {}).antigravity || {}).verifier || "");
+        a.accounts.antigravity = a.accounts.antigravity || [];
+        const ix = acc.email ? a.accounts.antigravity.findIndex((x) => x.email === acc.email) : -1;
+        if (ix >= 0) a.accounts.antigravity[ix] = acc;
+        else a.accounts.antigravity.push(acc);
+        a.activeIndex.antigravity = ix >= 0 ? ix : a.accounts.antigravity.length - 1;
+        delete (a.pending || {}).antigravity;
+        a.activeProvider = "antigravity";
+        config.auth.provider = "antigravity";
+        auth.persistAuth();
+        saveConfig();
+        conversations.clear();
+        saveHistory();
+        return ctx.reply(`✅ Antigravity login OK: ${acc.email || "?"} (project ${acc.projectId || "?"})\nProvider → \`antigravity\` | model \`${currentChatModel()}\``, { parse_mode: "Markdown" });
+      } else {
+        const acc = await auth.exchangeChatGPT(config, code, state ? (() => { try { return auth.decodeState(state).verifier; } catch { return ((a.pending || {}).chatgpt || {}).verifier || ""; } })() : (((a.pending || {}).chatgpt || {}).verifier || ""));
+        a.accounts.chatgpt = a.accounts.chatgpt || [];
+        a.accounts.chatgpt.push(acc);
+        a.activeIndex.chatgpt = a.accounts.chatgpt.length - 1;
+        delete (a.pending || {}).chatgpt;
+        a.activeProvider = "chatgpt";
+        config.auth.provider = "chatgpt";
+        auth.persistAuth();
+        saveConfig();
+        conversations.clear();
+        saveHistory();
+        return ctx.reply(`✅ ChatGPT login OK.\nProvider → \`chatgpt\` | model \`${currentChatModel()}\``, { parse_mode: "Markdown" });
+      }
+    } catch (e) { lastErr = e; }
+  }
+  return ctx.reply(`❌ Callback exchange failed: ${String((lastErr && lastErr.message) || "unknown").slice(0, 300)}`);
+}
+
+bot.command("login", async (ctx) => {
+  if (!isOwner(ctx)) return;
+  const raw = (ctx.message?.text || "").replace(/^\/login(@\w+)?\s*/i, "").trim();
+  const parts = raw.split(/\s+/).filter(Boolean);
+  const sub = (parts[0] || "").toLowerCase();
+  if (!sub) {
+    try { await ctx.reply(auth.authStatusText(config), { parse_mode: "Markdown", ...loginButtons() }); }
+    catch { await ctx.reply(auth.authStatusText(config)); }
+    return ctx.reply(LOGIN_HELP, { parse_mode: "Markdown" });
+  }
+  if (sub === "status") {
+    try { await ctx.reply(auth.authStatusText(config), { parse_mode: "Markdown", ...loginButtons() }); }
+    catch { await ctx.reply(auth.authStatusText(config)); }
+    return;
+  }
+  if (sub === "apikey" && !parts[1]) {
+    setProvider("apikey");
+    auth.reloadAuthCache();
+    return ctx.reply(`🔑 Provider → \`apikey\` (${getApiPool().length} endpoint(s)).\nManage with /apis • /addapi • /delapi`, { parse_mode: "Markdown" });
+  }
+  if (sub === "antigravity" && !parts[1]) return startAntigravityLogin(ctx);
+  if (sub === "chatgpt" && !parts[1]) return startChatGPTLogin(ctx);
+  if (sub === "use" && parts[1]) {
+    const p = parts[1].toLowerCase();
+    if (!["apikey", "antigravity", "chatgpt"].includes(p)) return ctx.reply("Usage: /login use <apikey|antigravity|chatgpt>");
+    if ((p === "antigravity" || p === "chatgpt")) {
+      const list = (auth.loadAuthCached().accounts[p] || []);
+      if (!list.length) return ctx.reply(`⚠️ No ${p} accounts yet — run /login ${p} first.`);
+    }
+    if (p === "apikey" && !getApiPool().length) return ctx.reply("⚠️ No API endpoints — /addapi <url> <key> first.");
+    setProvider(p);
+    auth.reloadAuthCache();
+    conversations.clear();
+    saveHistory();
+    return ctx.reply(`✅ Provider → \`${p}\` | model \`${currentChatModel()}\` (history cleared)`, { parse_mode: "Markdown" });
+  }
+  if (sub === "code") {
+    const hint = ["antigravity", "chatgpt"].includes((parts[2] || "").toLowerCase()) ? parts[2].toLowerCase() : "";
+    return handleLoginCode(ctx, parts[1] || "", hint);
+  }
+  if (sub === "callback") {
+    return handleLoginCallback(ctx, raw.slice(8).trim());
+  }
+  if (sub === "token") {
+    const access = parts[1] || "";
+    if (!access || access.length < 10) return ctx.reply("Usage: /login token <access_token> [refresh_token]");
+    const a = auth.loadAuthCached();
+    a.accounts.chatgpt = a.accounts.chatgpt || [];
+    a.accounts.chatgpt.push({ email: "", access, refresh: parts[2] || "", expires: Date.now() + 3600 * 1000 });
+    a.activeIndex.chatgpt = a.accounts.chatgpt.length - 1;
+    a.activeProvider = "chatgpt";
+    config.auth.provider = "chatgpt";
+    auth.persistAuth();
+    saveConfig();
+    conversations.clear();
+    saveHistory();
+    return ctx.reply(`✅ ChatGPT manual token saved.\nProvider → \`chatgpt\` | model \`${currentChatModel()}\``, { parse_mode: "Markdown" });
+  }
+  if (sub === "logout") {
+    const which = (parts[1] || "all").toLowerCase();
+    const a = auth.loadAuthCached();
+    if (which === "antigravity" || which === "google") a.accounts.antigravity = [];
+    else if (which === "chatgpt") a.accounts.chatgpt = [];
+    else { a.accounts.antigravity = []; a.accounts.chatgpt = []; }
+    a.activeProvider = "apikey";
+    config.auth.provider = "apikey";
+    auth.persistAuth();
+    saveConfig();
+    return ctx.reply(`👋 Logged out ${which}. Provider → \`apikey\`.`, { parse_mode: "Markdown" });
+  }
+  return ctx.reply(LOGIN_HELP, { parse_mode: "Markdown" });
+});
+bot.command("logout", async (ctx) => {
+  if (!isOwner(ctx)) return;
+  return handleLogoutCmd(ctx);
+});
+function pluginApiExtras() {
+  return {
+    runTool: (...a) => runTool(...a),
+    storage: { get: strGet, list: strList, save: (id, content) => { storage[String(id)] = { content: String(content), updated: Date.now() }; return saveStorage(); } },
+    chat: { chatStream, currentProvider, currentChatModel },
+  };
+}
+async function handleLogoutCmd(ctx) {
+  const raw = (ctx.message?.text || "").replace(/^\/logout(@\w+)?\s*/i, "").trim() || "all";
+  const a = auth.loadAuthCached();
+  const which = raw.split(/\s+/)[0].toLowerCase();
+  if (["antigravity", "chatgpt", "all"].includes(which)) {
+    if (which === "antigravity") a.accounts.antigravity = [];
+    else if (which === "chatgpt") a.accounts.chatgpt = [];
+    else { a.accounts.antigravity = []; a.accounts.chatgpt = []; }
+  } else { a.accounts.antigravity = []; a.accounts.chatgpt = []; }
+  a.activeProvider = "apikey";
+  config.auth.provider = "apikey";
+  auth.persistAuth();
+  saveConfig();
+  return ctx.reply(`👋 Logged out. Provider → \`apikey\`.`, { parse_mode: "Markdown" });
+}
+async function handleLoginCallbackQuery(ctx) {
+  const data = ctx.callbackQuery?.data || "";
+  if (!data.startsWith("login:")) return false;
+  if (ctx.from?.id !== config.ownerUserId) { await ctx.answerCbQuery("⚠️ Owner only").catch(() => {}); return true; }
+  const kind = data.slice(6);
+  await ctx.answerCbQuery("").catch(() => {});
+  if (kind === "status") {
+    try { await ctx.reply(auth.authStatusText(config), { parse_mode: "Markdown" }); } catch {}
+    return true;
+  }
+  if (kind === "apikey") {
+    setProvider("apikey");
+    await ctx.reply(`🔑 Provider → \`apikey\``, { parse_mode: "Markdown" }).catch(() => {});
+    return true;
+  }
+  if (kind === "antigravity") { await startAntigravityLogin(ctx); return true; }
+  if (kind === "chatgpt") { await startChatGPTLogin(ctx); return true; }
+  return true;
+}
+
+const PLUGIN_HELP = `🔌 *Plugins*
+
+Install (reply to a file):
+• Reply to a \`.js\` file with \`/plugin\` (or \`/plugin <id>\`)
+• Reply to a \`.zip\` bundle with \`/plugin\` (needs index.js at root)
+• \`/plugin <url> [id]\` — download + install from URL
+
+Manage:
+• \`/pl ls\` — list plugins
+• \`/pl info <id>\` — details
+• \`/pl reload\` — reload all
+• \`/pl on <id>\` / \`/pl off <id>\` — enable/disable
+• \`/pl del <id>\` — delete (+files)
+
+SDK for authors: \`/home/hex/htsdk\` (non-commercial).
+Example: reply to a .js with /plugin, then try its commands.`;
+
+async function downloadRepliedFile(ctx) {
+  const rep = ctx.message?.reply_to_message;
+  if (!rep || !rep.document) return { error: "Reply to a .js/.zip *document* with /plugin (or /plugin <url> [id])." };
+  const d = rep.document;
+  const name = d.file_name || "plugin.js";
+  if (!/\.(js|cjs|zip)$/i.test(name)) return { error: `Only .js/.zip supported (got ${name}).` };
+  if ((d.file_size || 0) > 5 * 1024 * 1024) return { error: "File too big (>5MB)." };
+  const dl = await downloadToTmp(ctx, d.file_id, name, 6);
+  const buf = fs.readFileSync(dl.path);
+  try { fs.unlinkSync(dl.path); } catch {}
+  return { buf, filename: name };
+}
+
+bot.command("plugin", async (ctx) => {
+  if (!isOwner(ctx)) return;
+  const raw = (ctx.message?.text || "").replace(/^\/plugin(@\w+)?\s*/i, "").trim();
+  const parts = raw.split(/\s+/).filter(Boolean);
+  if (parts.length && /^https?:\/\//i.test(parts[0])) {
+    const url = parts[0];
+    const hint = parts[1] || "";
+    const m = await ctx.reply("⏳ Downloading plugin…");
+    const res = await plugins.installFromUrl(url, hint, `url:${url.slice(0, 120)}`);
+    if (res.error) {
+      await safeEdit(ctx, m.chat.id, m.message_id, `❌ Install failed: ${res.error}`);
+      return;
+    }
+    const flags = (res.flags || []).length ? `\n⚠️ Flags: ${res.flags.join(", ")}` : "";
+    await safeEdit(ctx, m.chat.id, m.message_id,
+      `✅ Plugin \`${res.id}\` installed (${(res.commands || []).length} command(s): ${(res.commands || []).map((c) => "/" + c).join(" ") || "(none)"})${flags}\n/manage: /pl ls • /pl info ${res.id}`);
+    return;
+  }
+  if (!ctx.message?.reply_to_message?.document) {
+    return ctx.reply(PLUGIN_HELP, { parse_mode: "Markdown" });
+  }
+  const idHint = parts[0] || "";
+  let dl;
+  try { dl = await downloadRepliedFile(ctx); } catch (e) {
+    return ctx.reply(`❌ Download failed: ${String(e.message || e).slice(0, 200)}`);
+  }
+  if (dl.error) return ctx.reply(`⚠️ ${dl.error}`, { parse_mode: "Markdown" });
+  let id = String(idHint || "").trim() || dl.filename.replace(/\.(js|cjs|zip)$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 48) || `plugin-${Date.now() % 10000}`;
+  if (!plugins.validId(id)) return ctx.reply("⚠️ Bad id (use [A-Za-z0-9_-], max 48). Usage: /plugin [id] (reply to file)");
+  const m = await ctx.reply("⏳ Installing plugin…");
+  const res = await plugins.installFromBuffer({ id, buf: dl.buf, filename: dl.filename, source: `reply:${dl.filename.slice(0, 80)}` });
+  if (res.error) {
+    await safeEdit(ctx, m.chat.id, m.message_id, `❌ Install failed: ${res.error}`);
+    return;
+  }
+  const flags = (res.flags || []).length ? `\n⚠️ Flags: ${res.flags.join(", ")}` : "";
+  await safeEdit(ctx, m.chat.id, m.message_id,
+    `✅ Plugin \`${res.id}\` installed (${(res.commands || []).length} command(s): ${(res.commands || []).map((c) => "/" + c).join(" ") || "(none)"})${flags}\nManage: /pl ls • /pl info ${res.id}`);
+});
+
+bot.command("pl", async (ctx) => {
+  if (!isOwner(ctx)) return;
+  const raw = (ctx.message?.text || "").replace(/^\/pl(@\w+)?\s*/i, "").trim();
+  const parts = raw.split(/\s+/).filter(Boolean);
+  const sub = (parts[0] || "ls").toLowerCase();
+  const arg = parts[1] || "";
+  if (sub === "ls" || sub === "list") {
+    try { await ctx.reply(plugins.pluginListText(), { parse_mode: "Markdown" }); }
+    catch { await ctx.reply(plugins.pluginListText()); }
+    return;
+  }
+  if (sub === "reload" || sub === "refresh") {
+    const r = plugins.reloadAll(bot, config, pluginApiExtras());
+    return ctx.reply(`🔄 Reloaded: ✅ ${r.ok} ok • ❌ ${r.fail} failed • total ${r.total}`);
+  }
+  if (sub === "info") {
+    if (!arg) return ctx.reply("Usage: /pl info <id>");
+    const all = plugins.listPlugins();
+    const p = all.find((x) => x.id === arg);
+    if (!p) return ctx.reply(`⚠️ No plugin \`${arg}\``, { parse_mode: "Markdown" });
+    return ctx.reply(`🔌 \`${p.id}\` v${p.version || "?"} ${p.enabled ? "✅" : "⏸"}\nName: ${p.name}\nFile: \`${p.file}\`\nCommands: ${(p.commands || []).map((c) => "/" + c).join(" ") || "(none)"}\nSource: ${p.source || "?"}\n${p.description || ""}`.slice(0, 1500), { parse_mode: "Markdown" });
+  }
+  if (sub === "on" || sub === "enable" || sub === "off" || sub === "disable") {
+    if (!arg) return ctx.reply(`Usage: /pl ${sub} <id>`);
+    const on = !(sub === "off" || sub === "disable");
+    const r = plugins.setEnabled(arg, on);
+    if (r.error) return ctx.reply(`⚠️ ${r.error}`, { parse_mode: "Markdown" });
+    return ctx.reply(`${on ? "✅ Enabled" : "⏸ Disabled"} \`${arg}\``, { parse_mode: "Markdown" });
+  }
+  if (["del", "rm", "remove", "delete", "uninstall"].includes(sub)) {
+    if (!arg) return ctx.reply("Usage: /pl del <id>");
+    const r = plugins.removePlugin(arg);
+    if (r.error) return ctx.reply(`⚠️ ${r.error}`, { parse_mode: "Markdown" });
+    return ctx.reply(`🗑 Deleted \`${arg}\``, { parse_mode: "Markdown" });
+  }
+  return ctx.reply(PLUGIN_HELP, { parse_mode: "Markdown" });
+});
+
 for (const cmd of GROUP_CMDS) {
   bot.command(cmd, async (ctx) => {
     const text = ctx.message?.text || "";
@@ -1830,7 +2458,7 @@ for (const cmd of GROUP_CMDS) {
 bot.on("text", async (ctx) => {
   const text = ctx.message.text || "";
   if (ctx.chat?.type === "private") {
-    if (/^\/(talk|t|new|model|id|chatid|start|help|adduser|deluser|users|img|forget|apis|addapi|delapi|str|btw)(@\w+)?(\s|$)/i.test(text.trim())) return;
+    if (/^\/(talk|t|new|model|id|chatid|start|help|adduser|deluser|users|img|forget|apis|addapi|delapi|str|btw|login|logout|plugin|pl)(@\w+)?(\s|$)/i.test(text.trim())) return;
 
     if (hasRepliedMedia(ctx.message?.reply_to_message)) {
       try {
@@ -2164,6 +2792,11 @@ bot.on("message_reaction_count", () => {});
 bot.on("callback_query", async (ctx) => {
   const data = ctx.callbackQuery?.data || "";
 
+  if (data.startsWith("login:")) {
+    try { await handleLoginCallbackQuery(ctx); }
+    catch (e) { try { await ctx.answerCbQuery("⚠️ " + String(e.message || e).slice(0, 100)); } catch {} }
+    return;
+  }
   if (data.startsWith("mdl:") || data.startsWith("set:")) {
     try { await handleModelCallback(ctx); }
     catch (e) { try { await ctx.answerCbQuery("⚠️ " + String(e.message || e).slice(0, 100)); } catch {} }
@@ -2297,7 +2930,7 @@ bot.catch((e) => noteFatal("telegraf error (kept alive)", e));
           "my_chat_member", "chat_member", "chat_join_request", "chat_boost",
           "removed_chat_boost", "stopped_message_generation"],
       });
-      if (config.debugLog) console.log(`✅ bot | model=${config.model} | owner=${config.ownerUserId} | group=[${GROUP_CMDS.join(",")} + ${GROUP_PREFIXES.join(" ")} + mention + rep]`);
+      if (config.debugLog) console.log(`✅ bot | provider=${currentProvider()} model=${currentChatModel()} | owner=${config.ownerUserId} | plugins=${plugins.listPlugins().filter((p) => p.enabled).length} | group=[${GROUP_CMDS.join(",")} + ${GROUP_PREFIXES.join(" ")} + mention + rep]`);
       else console.log("✅ bot online");
       return;
     } catch (e) {

@@ -505,8 +505,23 @@ fi
 echo
 echo "=== 6/7 sanity (everything runnable?) ==="
 if node --check bot.js 2>/dev/null; then ok "bot.js syntax OK (node --check)"; else fail "bot.js syntax error"; fi
+if node --check auth.js 2>/dev/null; then ok "auth.js syntax OK (OAuth providers)"; else fail "auth.js syntax error"; fi
+if node --check plugins.js 2>/dev/null; then ok "plugins.js syntax OK (plugin system)"; else fail "plugins.js syntax error"; fi
 [ -f SKILLS.md ] && ok "SKILLS.md present" || warn "SKILLS.md missing"
 [ -x ./tools ] && ok "tools binary executable" || fail "tools binary not executable"
+[ -d plugins ] && ok "plugins/ dir present" || warn "plugins/ dir missing (bot will create)"
+[ -f plugins.json ] && node -e "JSON.parse(require('fs').readFileSync('plugins.json','utf8'))" 2>/dev/null && ok "plugins.json present + valid JSON" || warn "plugins.json missing/invalid (bot will create)"
+[ -f auth.json ] && node -e "JSON.parse(require('fs').readFileSync('auth.json','utf8'))" 2>/dev/null && ok "auth.json present + valid JSON" || warn "auth.json missing (created on first /login)"
+if [ -d /home/hex/htsdk ]; then ok "htsdk SDK present (/home/hex/htsdk)"
+else warn "htsdk SDK missing at /home/hex/htsdk"; fi
+node -e "require('./auth.js'); require('./plugins.js'); require('/home/hex/htsdk/index.js'); console.log('ok')" 2>/dev/null && ok "auth+plugins+htsdk loadable" || warn "auth/plugins/htsdk require failed — check node deps"
+if [ -f config.json ]; then
+  node -e "
+    const c=require('./config.json');
+    const p=(c.auth&&c.auth.provider)||'apikey';
+    if(!['apikey','antigravity','chatgpt'].includes(p)){ console.error('bad provider '+p); process.exit(1); }
+  " 2>/dev/null && ok "config.auth.provider valid (apikey|antigravity|chatgpt)" || warn "config.auth.provider missing/invalid (bot defaults to apikey)"
+fi
 for f in memory.json models_cache.json; do
   if [ -f "$f" ]; then node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))" 2>/dev/null && ok "$f present + valid JSON" || warn "$f exists but is not valid JSON (bot will overwrite)"
   else

@@ -7,5 +7,15 @@
   "model": "jmbot/mimo-v2.6-flash",
   "systemPrompt": "You are a telegram bot that can talk to users, run shell commands, and generate images. You are helpful, creative, clever, and very sacratic",
   "temperature": 0.7,
-  "maxTokens": 2048
+  "maxTokens": 2048,
+  "auth": {
+    "provider": "apikey",
+    "antigravity": {
+      "model": "gemini-3-pro-high"
+    },
+    "chatgpt": {
+      "model": "gpt-4o-mini",
+      "baseURL": "https://api.openai.com/v1"
+    }
+  }
 }
