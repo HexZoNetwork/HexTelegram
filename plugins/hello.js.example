@@ -1,5 +1,5 @@
 /**
- * Hello — example HexTelegram plugin (HXZ License, non-commercial).
+ * Hello - example HexTelegram plugin (HXZ License, non-commercial).
  * Install: reply to this file with /plugin  (or /plugin <url>)
  * Try: /hello , /ping , /echo <text>
  */
@@ -8,7 +8,7 @@
 module.exports = {
   name: "hello",
   version: "1.0.0",
-  description: "Example plugin — hello/ping/echo commands.",
+  description: "Example plugin - hello/ping/echo commands.",
 
   commands: {
     hello: {

@@ -1,6 +1,6 @@
 <div align="center">
   <h1>Hexzie</h1>
-  <p><b>HexTelegram (HTG)</b> — AI Telegram bot by <b>HexzoNetwork</b></p>
+  <p><b>HexTelegram (HTG)</b> - AI Telegram bot by <b>HexzoNetwork</b></p>
 </div>
 
 > ⚠️ **Project in active development**, some features may still be in progress.
@@ -9,26 +9,26 @@
 
 * ✅ Telegraf + Node.js (bot framework)
 * 📌 OpenAI-compatible API for chat + function-calling tools (**active development**)
-* ✅ Go tool runner (`tools-go`) — shell, files, web, screenshots, sysinfo
-* ✅ Full filesystem control from `/` — no workspace jail
+* ✅ Go tool runner (`tools-go`) - shell, files, web, screenshots, sysinfo
+* ✅ Full filesystem control from `/` - no workspace jail
 * ✅ ChatGPT-style streaming replies with live progress labels
 
 ---
 
 ## Features
 
-* 💬 **Chat** — streaming answers, auto-summary memory, per-chat history
-* 💻 **Shell + files** — `shell_exec` (any command), `file_read` / `file_write` / `file_list` from `/`
-* 🌐 **Web** — `web_search` (Bing), `web_fetch`, `web_check` (site recon), `web_screenshot` (chromium → PNG)
-* ✉️ **Telegram tools** — send message/photo/document, inline buttons, edit, delete, forward, pin, chat actions, `get_chat`
-* 🖼️ **Vision + files** — send photo/document, reply-to-file summarization, PDF text extraction (images sent as base64 data URLs — no token leak, always renderable)
-* 💾 **AI storage** — persistent key-value notes (`storage.json`) the AI reads/writes via `store_*` tools; owner manages with `/str`
-* 📌 **Side notes** — `/btw <msg>` injects guidance into a running task without restarting it
-* 🔐 **Access control** — owner + allowlist, silently ignores strangers
-* 👥 **Groups** — `/talk` `/t` triggers, `= ~ |` prefixes, @mention, reply-to-bot
-* 📡 **Multi-API failover** — pool of endpoints, auto-rotate on 5xx/network errors
-* 🧠 **Memory** — rolling window + model-generated summaries in `memory.json`
-* 🤖 **Model picker** — `/model c` live-tests every model, paged button UI
+* 💬 **Chat** - streaming answers, auto-summary memory, per-chat history
+* 💻 **Shell + files** - `shell_exec` (any command), `file_read` / `file_write` / `file_list` from `/`
+* 🌐 **Web** - `web_search` (Bing), `web_fetch`, `web_check` (site recon), `web_screenshot` (chromium → PNG)
+* ✉️ **Telegram tools** - send message/photo/document, inline buttons, edit, delete, forward, pin, chat actions, `get_chat`
+* 🖼️ **Vision + files** - send photo/document, reply-to-file summarization, PDF text extraction (images sent as base64 data URLs - no token leak, always renderable)
+* 💾 **AI storage** - persistent key-value notes (`storage.json`) the AI reads/writes via `store_*` tools; owner manages with `/str`
+* 📌 **Side notes** - `/btw <msg>` injects guidance into a running task without restarting it
+* 🔐 **Access control** - owner + allowlist, silently ignores strangers
+* 👥 **Groups** - `/talk` `/t` triggers, `= ~ |` prefixes, @mention, reply-to-bot
+* 📡 **Multi-API failover** - pool of endpoints, auto-rotate on 5xx/network errors
+* 🧠 **Memory** - rolling window + model-generated summaries in `memory.json`
+* 🤖 **Model picker** - `/model c` live-tests every model, paged button UI
 
 ---
 
@@ -62,11 +62,11 @@ Core keys:
 
 | Key | Required | Default | What |
 |---|---|---|---|
-| `telegramToken` | yes | — | From [@BotFather](https://t.me/BotFather) |
-| `ownerUserId` | yes | — | Your numeric Telegram ID (ask the bot `/id`) |
+| `telegramToken` | yes | - | From [@BotFather](https://t.me/BotFather) |
+| `ownerUserId` | yes | - | Your numeric Telegram ID (ask the bot `/id`) |
 | `allowedUserIds` | no | `[]` | Extra user IDs, e.g. `[111, 222]` |
-| `baseURL` | yes* | — | OpenAI-compatible endpoint (*only needed for `apikey` provider) |
-| `apiKey` | yes* | — | API key for `baseURL` (*only needed for `apikey` provider) |
+| `baseURL` | yes* | - | OpenAI-compatible endpoint (*only needed for `apikey` provider) |
+| `apiKey` | yes* | - | API key for `baseURL` (*only needed for `apikey` provider) |
 | `model` | no | `jmbot/mimo-v2.6-flash` | Chat model for apikey (change live with `/model c`) |
 | `systemPrompt` | no | `""` | Extra persona text, prepended to system prompt |
 | `temperature` | no | `0.7` | Sampling temperature |
@@ -82,7 +82,7 @@ Core keys:
 { "command": "ls -la", "workDir": "/home/hex" }
 ```
 
-Everything else (streaming interval, group triggers, history window, timeouts) uses built-in defaults — search `bot.js` for `??` / `||` fallbacks to tune them.
+Everything else (streaming interval, group triggers, history window, timeouts) uses built-in defaults - search `bot.js` for `??` / `||` fallbacks to tune them.
 
 ---
 
@@ -164,7 +164,7 @@ Extra: `| <instruction>` replying to a message = instruction + quoted text (e.g.
 | `web_search` | `query`, `max` (1–15) | Numbered titles + URLs + snippets (Bing) |
 | `web_check` | `url` | Status, final URL, server, title, meta, H1/H2/link counts, tech hints, snippet |
 | `web_screenshot` | `url`, `width`, `height`, `timeoutSec` | Local PNG path → send via `tg_send_photo` |
-| `sysinfo` | — | OS, arch, CPU, mem%, disk% |
+| `sysinfo` | - | OS, arch, CPU, mem%, disk% |
 
 ### Node built-ins (`bot.js` `runTool`)
 
@@ -181,7 +181,7 @@ Telegram update → Telegraf middleware (stop-signal, auth by sender ID, plugin 
   → event handler (text/photo/doc/voice/callback/…)
   → processText: builds [Context:] block (chat/sender/reply/forward IDs)
   → handlePrompt: agentic loop (max 8 rounds)
-      → chatStream: routes by provider —
+      → chatStream: routes by provider -
           apikey: POST {model, messages, tools} to active API (SSE)
           antigravity: translate OpenAI → Gemini contents, call cloudcode-pa gateway (SSE)
           chatgpt: Bearer OAuth token against OpenAI-compatible endpoint (SSE)
@@ -191,23 +191,23 @@ Telegram update → Telegraf middleware (stop-signal, auth by sender ID, plugin 
 
 Key details:
 
-* **Auth providers** — `config.auth.provider`: `apikey` (legacy pool), `antigravity` (Google OAuth PKCE → Antigravity Unified Gateway, full port of opencode-antigravity-auth translation: PKCE, refresh, project discovery, Gemini `contents` mapping, schema cleaning, SSE unwrap, multi-account rotation), `chatgpt` (experimental OAuth PKCE + manual token paste → Bearer against OpenAI-compatible `auth.chatgpt.baseURL`). Switch live with `/login use <provider>`; tokens in `auth.json` (gitignored). ⚠️ Unofficial OAuth carries the same ToS/account risk as the upstream plugin.
-* **Plugins** — `plugins/` + `plugins.json` registry, loaded via `plugins.js` dispatcher middleware (dynamic, no Telegraf unregister needed). Install: reply to `.js` (≤500KB) or `.zip` (≤5MB, `index.js` at root) with `/plugin`, or `/plugin <url> [id]`. Manage: `/pl ls|info|reload|on|off|del`. Only owner can install/manage; any allowed user can run plugin commands. Safety scan flags env/secret/network/shell patterns on install.
-* **SDK** — repo `HexZoNetwork/htsdk` (non-commercial HXZ, also at `/home/hex/htsdk`): `definePlugin`, `createAgent`, `defineProvider`, examples (`hello-plugin.js`, `custom-agent.js`, `antigravity-provider.js`). Install with no publish step: `npm install github:HexZoNetwork/htsdk`, then `require("htsdk")`. Copy a plugin file, send it to the bot, reply `/plugin` to install.
+* **Auth providers** - `config.auth.provider`: `apikey` (legacy pool), `antigravity` (Google OAuth PKCE → Antigravity Unified Gateway, full port of opencode-antigravity-auth translation: PKCE, refresh, project discovery, Gemini `contents` mapping, schema cleaning, SSE unwrap, multi-account rotation), `chatgpt` (experimental OAuth PKCE + manual token paste → Bearer against OpenAI-compatible `auth.chatgpt.baseURL`). Switch live with `/login use <provider>`; tokens in `auth.json` (gitignored). ⚠️ Unofficial OAuth carries the same ToS/account risk as the upstream plugin.
+* **Plugins** - `plugins/` + `plugins.json` registry, loaded via `plugins.js` dispatcher middleware (dynamic, no Telegraf unregister needed). Install: reply to `.js` (≤500KB) or `.zip` (≤5MB, `index.js` at root) with `/plugin`, or `/plugin <url> [id]`. Manage: `/pl ls|info|reload|on|off|del`. Only owner can install/manage; any allowed user can run plugin commands. Safety scan flags env/secret/network/shell patterns on install.
+* **SDK** - repo `HexZoNetwork/htsdk` (non-commercial HXZ, also at `/home/hex/htsdk`): `definePlugin`, `createAgent`, `defineProvider`, examples (`hello-plugin.js`, `custom-agent.js`, `antigravity-provider.js`). Install with no publish step: `npm install github:HexZoNetwork/htsdk`, then `require("htsdk")`. Copy a plugin file, send it to the bot, reply `/plugin` to install.
 
 Key details:
 
-* **Streaming UI** — one progress message, edited per state (`Thinking…` → `🔍 Checking…` → `✅ done` → final answer). Native `sendMessageDraft` path exists but the progress-message loop is the active one.
-* **Stale-supersede** — each chat keeps only the newest request; older ones abort and never render (`⏭ Skipped…`).
-* **Failover** — API pool (`config.apis`, migrated from legacy `baseURL`/`apiKey`); 5xx/network errors rotate to next API; 502/503/504 retried with backoff (8s, 20s) then non-stream fallback.
-* **Memory** — `conversations` map (last 30 turns) + `memory.json` summaries; overflow beyond 12 recent turns is async-summarized by the chat model.
-* **Vision** — Telegram photos/docs/thumbnails are downloaded server-side and sent to the model as base64 data URLs (provider fetch of `api.telegram.org` links is unreliable and would leak the bot token); old image blocks are scrubbed from history so payloads stay small.
-* **AI storage** — `storage.json` key-value notes (`[A-Za-z0-9_-]`, ≤64-char ids, ≤50000-char content); AI uses `store_*` tools, owner uses `/str`; missing/corrupt runtime JSON files (`storage/memory/models_cache/text`) are auto-created on boot via `ensureJson`.
-* **Side notes** — `/btw` queues guidance into the live run for that chat; drained into the message list before every model round as `[SIDE NOTE ...]`; run liveness tracked via `activeReq` (cleaned on all exits).
-* **Auth** — `isAllowed(senderId)` checked FIRST on every update (groups included); strangers get silence. Owner-only gates on `/model c`, `/str`, user/API management.
-* **IPv4** — forced (`dns.setDefaultResultOrder("ipv4first")` + pinned lookup + Go `tcp4` dialer) because the host has broken IPv6.
-* **Boot** — `getMe` + `launch` retried forever (2s→60s backoff); `unhandledRejection`/`telegraf error` logged, kept alive up to 10/min then exit for a clean restart; `uncaughtException` exits immediately (state may be corrupt).
-* **Skills** — `SKILLS.md` loaded once; `SHORT_PROMPT` (in `bot.js`) is the hot system prompt; `read_skill(section)` fetches detail on demand to save tokens.
+* **Streaming UI** - one progress message, edited per state (`Thinking…` → `🔍 Checking…` → `✅ done` → final answer). Native `sendMessageDraft` path exists but the progress-message loop is the active one.
+* **Stale-supersede** - each chat keeps only the newest request; older ones abort and never render (`⏭ Skipped…`).
+* **Failover** - API pool (`config.apis`, migrated from legacy `baseURL`/`apiKey`); 5xx/network errors rotate to next API; 502/503/504 retried with backoff (8s, 20s) then non-stream fallback.
+* **Memory** - `conversations` map (last 30 turns) + `memory.json` summaries; overflow beyond 12 recent turns is async-summarized by the chat model.
+* **Vision** - Telegram photos/docs/thumbnails are downloaded server-side and sent to the model as base64 data URLs (provider fetch of `api.telegram.org` links is unreliable and would leak the bot token); old image blocks are scrubbed from history so payloads stay small.
+* **AI storage** - `storage.json` key-value notes (`[A-Za-z0-9_-]`, ≤64-char ids, ≤50000-char content); AI uses `store_*` tools, owner uses `/str`; missing/corrupt runtime JSON files (`storage/memory/models_cache/text`) are auto-created on boot via `ensureJson`.
+* **Side notes** - `/btw` queues guidance into the live run for that chat; drained into the message list before every model round as `[SIDE NOTE ...]`; run liveness tracked via `activeReq` (cleaned on all exits).
+* **Auth** - `isAllowed(senderId)` checked FIRST on every update (groups included); strangers get silence. Owner-only gates on `/model c`, `/str`, user/API management.
+* **IPv4** - forced (`dns.setDefaultResultOrder("ipv4first")` + pinned lookup + Go `tcp4` dialer) because the host has broken IPv6.
+* **Boot** - `getMe` + `launch` retried forever (2s→60s backoff); `unhandledRejection`/`telegraf error` logged, kept alive up to 10/min then exit for a clean restart; `uncaughtException` exits immediately (state may be corrupt).
+* **Skills** - `SKILLS.md` loaded once; `SHORT_PROMPT` (in `bot.js`) is the hot system prompt; `read_skill(section)` fetches detail on demand to save tokens.
 
 ---
 
@@ -268,5 +268,5 @@ Fory you that dont wan't your file get attack, add this into your config
 
 ## License
 
-HXZ License © 2026 — HexzoNetwork. See [LICENCE](./LICENCE).
+HXZ License © 2026 - HexzoNetwork. See [LICENCE](./LICENCE).
 Non-commercial use only; commercial use needs written permission.

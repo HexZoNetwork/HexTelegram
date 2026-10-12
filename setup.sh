@@ -101,31 +101,31 @@ else ask_yn "Advanced config?" "N" ADV; fi
 if is_yn_yes "$ADV"; then ok "mode: Advanced (all settings asked)"; else ok "mode: Normal (essentials only)"; fi
 echo
 echo "=== 1/7 Node.js ==="
-if ! need_cmd node; then echo "ERROR: node not found — install Node 18+ first"; exit 1; fi
+if ! need_cmd node; then echo "ERROR: node not found - install Node 18+ first"; exit 1; fi
 NODE_V=$(node -p "process.versions.node" 2>/dev/null || echo "?")
 NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
 echo "  node v$NODE_V"
-if [ "${NODE_MAJOR:-0}" -lt 18 ]; then fail "node $NODE_V < 18 — upgrade required"; else ok "node >= 18 (v$NODE_V)"; fi
+if [ "${NODE_MAJOR:-0}" -lt 18 ]; then fail "node $NODE_V < 18 - upgrade required"; else ok "node >= 18 (v$NODE_V)"; fi
 if ! need_cmd npm; then fail "npm not found"; else ok "npm available ($(npm --version 2>/dev/null))"; fi
 if [ "$CHECK_ONLY" = "0" ]; then
   if [ -f package-lock.json ]; then npm ci 2>&1 | tail -2 || npm install 2>&1 | tail -2
   else npm install 2>&1 | tail -2; fi
 fi
-if node -e "require('telegraf')" 2>/dev/null; then ok "telegraf module loads (runnable)"; else fail "telegraf module missing — run: npm install"; fi
+if node -e "require('telegraf')" 2>/dev/null; then ok "telegraf module loads (runnable)"; else fail "telegraf module missing - run: npm install"; fi
 echo
 echo "=== 2/7 Go toolchain + tool runner ==="
-if ! need_cmd go; then fail "go not found — install Go 1.21+ first"; echo; else
+if ! need_cmd go; then fail "go not found - install Go 1.21+ first"; echo; else
   echo "  $(go version)"
   GO_MAJOR=$(go version | sed -n 's/.*go\([0-9]*\)\..*/\1/p'); GO_MINOR=$(go version | sed -n 's/.*go[0-9]*\.\([0-9]*\).*/\1/p')
   if [ "${GO_MAJOR:-0}" -lt 1 ] || { [ "${GO_MAJOR:-0}" -eq 1 ] && [ "${GO_MINOR:-0}" -lt 21 ]; }; then
-    fail "go < 1.21 — upgrade required"
+    fail "go < 1.21 - upgrade required"
   else ok "go >= 1.21"; fi
   if [ "$CHECK_ONLY" = "0" ]; then
     go mod download 2>/dev/null || true
     go build -o tools ./tools-go && ok "go build ./tools-go (runnable)" || { fail "go build failed"; exit 1; }
     chmod +x tools
   else
-    [ -x ./tools ] && ok "tools binary present" || fail "tools binary missing — run without --check-only to build"
+    [ -x ./tools ] && ok "tools binary present" || fail "tools binary missing - run without --check-only to build"
   fi
 fi
 if [ -x ./tools ]; then
@@ -133,7 +133,7 @@ if [ -x ./tools ]; then
   run_tool() {
     local name="$1" args="$2" want="$3" out
     out=$(./tools "{\"name\":\"$name\",\"args\":$args}" 2>&1 || true)
-    if echo "$out" | grep -q "$want"; then ok "$name runnable"; else fail "$name broken — got: $(echo "$out" | head -c 160)"; fi
+    if echo "$out" | grep -q "$want"; then ok "$name runnable"; else fail "$name broken - got: $(echo "$out" | head -c 160)"; fi
   }
   run_tool sysinfo   '{}' 'OS:'
   run_tool calc      '{"expression":"(2+3)*4"}' '(2+3)\*4 = 20'
@@ -151,10 +151,10 @@ if [ -x ./tools ]; then
   if ./tools '{"name":"web_screenshot","args":{"url":"https://example.com"}}' 2>&1 | grep -q "^SCREENSHOT:"; then
     ok "web_screenshot runnable"
   else
-    warn "web_screenshot not working yet — see 3/7 chromium section"
+    warn "web_screenshot not working yet - see 3/7 chromium section"
   fi
 else
-  fail "tools binary not executable — Go section failed, skipping tool smoke tests"
+  fail "tools binary not executable - Go section failed, skipping tool smoke tests"
 fi
 echo
 echo "=== 3/7 chromium (for web_screenshot) ==="
@@ -206,11 +206,11 @@ manual_chrome_cmd() {
 }
 install_chrome_snap() {
   if ! need_cmd snap; then
-    info "snapd not found — installing snapd first (needs sudo)…"
+    info "snapd not found - installing snapd first (needs sudo)…"
     need_cmd apt-get || { warn "no apt-get to install snapd"; return 1; }
     sudo apt-get update && sudo apt-get install -y snapd || { warn "snapd install failed"; return 1; }
   fi
-  snap list >/dev/null 2>&1 || warn "snapd not responding yet (first boot?) — continuing anyway"
+  snap list >/dev/null 2>&1 || warn "snapd not responding yet (first boot?) - continuing anyway"
   info "installing chromium via snap (needs sudo)…"
   sudo snap install chromium || { warn "snap install chromium failed"; return 1; }
   for _ in 1 2 3 4 5 6; do
@@ -291,11 +291,11 @@ try_install_chromium() {
   [ "$CHECK_ONLY" = "1" ] && { warn "check-only: skipping chromium install attempt"; return 1; }
   local ans="n"
   if [ "$NONINTERACTIVE" = "1" ]; then
-    warn "chromium missing — non-interactive run, skipping auto-install (install manually: $(manual_chrome_cmd))"
+    warn "chromium missing - non-interactive run, skipping auto-install (install manually: $(manual_chrome_cmd))"
     return 1
   fi
   ask_yn "Chromium not found. Try to install it now (needs sudo)?" "N" ans
-  is_yn_yes "$ans" || { warn "skipped chromium install — web_screenshot will fall back to text"; return 1; }
+  is_yn_yes "$ans" || { warn "skipped chromium install - web_screenshot will fall back to text"; return 1; }
   if os_is ubuntu linuxmint pop zorin elementary neon kubuntu xubuntu lubuntu; then
     install_chrome_snap && return 0
     install_chrome_deb_official && return 0
@@ -315,7 +315,7 @@ try_install_chromium() {
   fi
   if need_cmd snap; then install_chrome_snap && return 0; fi
   if need_cmd apt-get; then install_chrome_apt && return 0; install_chrome_deb_official && return 0; fi
-  warn "no supported installer (need snap, apt, dnf, pacman, zypper or apk) — install chromium manually for web_screenshot"
+  warn "no supported installer (need snap, apt, dnf, pacman, zypper or apk) - install chromium manually for web_screenshot"
   return 1
 }
 verify_chromium() {
@@ -324,7 +324,7 @@ verify_chromium() {
   [ -z "$ver" ] && ver=$("$bin" --version 2>&1 | head -1 || true)
   echo "  version: ${ver:-(no version output)}"
   if file "$bin" 2>/dev/null | grep -q "shell script"; then
-    warn "snap wrapper detected — screenshots write under ~/snap/chromium (tool already handles this)"
+    warn "snap wrapper detected - screenshots write under ~/snap/chromium (tool already handles this)"
   fi
   if "$bin" --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --dump-dom https://example.com 2>/dev/null | grep -qi "example"; then
     ok "chromium headless smoke test (--dump-dom example.com)"
@@ -337,7 +337,7 @@ verify_chromium() {
       return 1
     fi
   fi
-  if [ ! -x ./tools ]; then warn "tools binary missing — cannot live-test screenshot"; return 1; fi
+  if [ ! -x ./tools ]; then warn "tools binary missing - cannot live-test screenshot"; return 1; fi
   shot=$(./tools '{"name":"web_screenshot","args":{"url":"https://example.com"}}' 2>&1 | grep -v "cannot change mount namespace\|update.go" || true)
   echo "  $shot" | head -3
   if echo "$shot" | grep -q "^SCREENSHOT:"; then
@@ -346,7 +346,7 @@ verify_chromium() {
       ok "live screenshot OK ($SHOT_PATH, $(wc -c <"$SHOT_PATH" | tr -d ' ') bytes)"
       return 0
     else fail "screenshot reported OK but file missing ($SHOT_PATH)"; return 1; fi
-  else fail "live screenshot failed — see output above"; return 1; fi
+  else fail "live screenshot failed - see output above"; return 1; fi
 }
 if [ -z "$CHROME_BIN" ]; then
   warn "chromium not found in PATH"
@@ -356,29 +356,29 @@ if [ -n "$CHROME_BIN" ]; then
   echo "  found: $CHROME_BIN"
   if verify_chromium "$CHROME_BIN"; then CHROMIUM_OK=1; fi
 else
-  warn "no chromium — web_screenshot unavailable (bot falls back to web_check + web_fetch)"
+  warn "no chromium - web_screenshot unavailable (bot falls back to web_check + web_fetch)"
 fi
-[ -e /dev/shm ] || warn "/dev/shm missing — headless chrome may be slow (tool passes --disable-dev-shm-usage)"
+[ -e /dev/shm ] || warn "/dev/shm missing - headless chrome may be slow (tool passes --disable-dev-shm-usage)"
 echo
 echo "=== 4/7 optional helpers ==="
 need_cmd pdftotext && { pdftotext -v >/dev/null 2>&1 && ok "pdftotext runnable (PDF reading)" || warn "pdftotext present but not runnable"; } \
-  || warn "pdftotext missing — scanned PDFs unreadable (sudo apt install -y poppler-utils)"
+  || warn "pdftotext missing - scanned PDFs unreadable (sudo apt install -y poppler-utils)"
 need_cmd curl && { curl --version >/dev/null 2>&1 && ok "curl runnable ($(curl --version 2>/dev/null | head -1))" || warn "curl present but not runnable"; } \
   || warn "curl missing"
 need_cmd python3 && { python3 --version >/dev/null 2>&1 && ok "python3 runnable ($(python3 --version 2>&1))" || warn "python3 present but not runnable"; } \
   || warn "python3 missing"
-need_cmd file && ok "file runnable" || warn "file(1) missing — used only for snap-wrapper detection"
+need_cmd file && ok "file runnable" || warn "file(1) missing - used only for snap-wrapper detection"
 echo
-echo "=== 5/7 config (Normal:$([ "$ADV" = "y" ] && echo "no — Advanced" || echo "yes")) ==="
+echo "=== 5/7 config (Normal:$([ "$ADV" = "y" ] && echo "no - Advanced" || echo "yes")) ==="
 if [ ! -f config.json ]; then
   if [ "$CHECK_ONLY" = "1" ]; then fail "config.json missing (check-only: not creating)"; else
-    if [ -f example.config.json ]; then warn "config.json missing — creating from example.config.json"; cp example.config.json config.json
+    if [ -f example.config.json ]; then warn "config.json missing - creating from example.config.json"; cp example.config.json config.json
     else fail "config.json AND example.config.json both missing"; fi
   fi
 fi
 if [ -f config.json ]; then
   if ! node -e "JSON.parse(require('fs').readFileSync('config.json','utf8'))" 2>/dev/null; then
-    fail "config.json is not valid JSON — fix it before continuing"
+    fail "config.json is not valid JSON - fix it before continuing"
   else
     C_TOKEN="$(json_get telegramToken)"; C_OWNER="$(json_get ownerUserId)"
     C_BASE="$(json_get baseURL)"; C_KEY="$(json_get apiKey)"
@@ -398,7 +398,7 @@ if [ -f config.json ]; then
     [ -z "$C_BASE" ] && C_BASE="$C_API0U"
     [ -z "$C_KEY" ] && C_KEY="$C_API0K"
     if [ "$CHECK_ONLY" = "0" ]; then
-      echo "  Answer prompts — Enter keeps the current value shown in [brackets]."
+      echo "  Answer prompts - Enter keeps the current value shown in [brackets]."
       if [ -n "$C_TOKEN" ] && [[ "$C_TOKEN" != PASTE* ]]; then
         info "telegramToken: $(mask "$C_TOKEN")"
         ask_secret "Telegram bot token from @BotFather (Enter=keep)" "$C_TOKEN" N_TOKEN
@@ -488,9 +488,9 @@ if [ -f config.json ]; then
       let bad=0;
       const need=(cond,msg)=>{ if(!cond){console.error('  ❌ config.json: '+msg); bad=1;} };
       need(c.telegramToken && !String(c.telegramToken).includes('PASTE'), 'set telegramToken (from @BotFather)');
-      if(!c.ownerUserId) console.error('  ⚠️ ownerUserId missing — bot ignores everyone until set');
+      if(!c.ownerUserId) console.error('  ⚠️ ownerUserId missing - bot ignores everyone until set');
       need((Array.isArray(c.apis)&&c.apis.length)||(c.baseURL&&c.apiKey), 'set baseURL + apiKey (or apis[0])');
-      if(c.telegramToken && !/^\d+:[\w-]{20,}$/.test(String(c.telegramToken))) console.error('  ⚠️ telegramToken has an unusual shape — double-check it');
+      if(c.telegramToken && !/^\d+:[\w-]{20,}$/.test(String(c.telegramToken))) console.error('  ⚠️ telegramToken has an unusual shape - double-check it');
       process.exit(bad);
     "; then
       MODEL_SHOW="$(json_get model)"; [ -z "$MODEL_SHOW" ] && MODEL_SHOW="default"
@@ -514,7 +514,7 @@ if node --check plugins.js 2>/dev/null; then ok "plugins.js syntax OK (plugin sy
 [ -f auth.json ] && node -e "JSON.parse(require('fs').readFileSync('auth.json','utf8'))" 2>/dev/null && ok "auth.json present + valid JSON" || warn "auth.json missing (created on first /login)"
 if [ -d /home/hex/htsdk ]; then ok "htsdk SDK present (/home/hex/htsdk)"
 else warn "htsdk SDK missing at /home/hex/htsdk"; fi
-node -e "require('./auth.js'); require('./plugins.js'); require('/home/hex/htsdk/index.js'); console.log('ok')" 2>/dev/null && ok "auth+plugins+htsdk loadable" || warn "auth/plugins/htsdk require failed — check node deps"
+node -e "require('./auth.js'); require('./plugins.js'); require('/home/hex/htsdk/index.js'); console.log('ok')" 2>/dev/null && ok "auth+plugins+htsdk loadable" || warn "auth/plugins/htsdk require failed - check node deps"
 if [ -f config.json ]; then
   node -e "
     const c=require('./config.json');
@@ -530,15 +530,15 @@ for f in memory.json models_cache.json; do
   fi
 done
 [ "$CHROMIUM_OK" = "1" ] && ok "chromium fully working (binary + headless + live screenshot)" \
-  || warn "chromium not fully working — web_screenshot disabled, text fallback active"
+  || warn "chromium not fully working - web_screenshot disabled, text fallback active"
 if [ -f config.json ] && need_cmd curl; then
   TOK="$(json_get telegramToken)"
-  if [[ "$TOK" == PASTE* ]] || [ -z "$TOK" ]; then warn "telegramToken unset — skipping Telegram getMe check"
+  if [[ "$TOK" == PASTE* ]] || [ -z "$TOK" ]; then warn "telegramToken unset - skipping Telegram getMe check"
   elif [[ "$TOK" =~ ^[0-9]+:[A-Za-z0-9_-]{20,}$ ]]; then
     if curl -sS -m 10 "https://api.telegram.org/bot${TOK}/getMe" 2>/dev/null | grep -q '"ok":true'; then
       ok "Telegram token live (getMe ok)"
-    else warn "Telegram getMe failed — token may be wrong or network is offline"; fi
-  else warn "telegramToken shape looks wrong — skipping live getMe check"; fi
+    else warn "Telegram getMe failed - token may be wrong or network is offline"; fi
+  else warn "telegramToken shape looks wrong - skipping live getMe check"; fi
 fi
 if [ -f config.json ] && need_cmd curl; then
   APIU="$(node -e 'let c={};try{c=require("./config.json")}catch{};const a=Array.isArray(c.apis)&&c.apis[0];process.stdout.write(String(a?.baseURL||c.baseURL||""))' 2>/dev/null)"
@@ -546,10 +546,10 @@ if [ -f config.json ] && need_cmd curl; then
   if [ -n "$APIU" ] && [ -n "$APIK" ] && [[ "$APIK" != sk-YOUR* ]]; then
     if curl -sS -m 15 -H "Authorization: Bearer $APIK" "${APIU%/}/models" 2>/dev/null | grep -qi "data\|object\|model"; then
       ok "API endpoint reachable (${APIU%/}/models)"
-    else warn "API endpoint not reachable now (${APIU}) — bot will retry/failover at runtime"; fi
-  else warn "API baseURL/key unset — skipping live API check"; fi
+    else warn "API endpoint not reachable now (${APIU}) - bot will retry/failover at runtime"; fi
+  else warn "API baseURL/key unset - skipping live API check"; fi
 fi
 echo
 echo "RESULT: ✅ $PASS passed · ⚠️ $WARN warnings · ❌ $FAIL failures"
 if [ "$FAIL" -gt 0 ]; then echo "Fix the ❌ lines above, then re-run: bash setup.sh"; exit 1; fi
-if [ "$CHECK_ONLY" = "1" ]; then echo "✅ check-only done — everything verifiable is runnable."; else echo "✅ setup done — run: npm start"; fi
+if [ "$CHECK_ONLY" = "1" ]; then echo "✅ check-only done - everything verifiable is runnable."; else echo "✅ setup done - run: npm start"; fi

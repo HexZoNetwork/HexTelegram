@@ -1,5 +1,5 @@
 /**
- * HexTelegram Auth — OAuth provider framework (Antigravity full clone + ChatGPT starter)
+ * HexTelegram Auth - OAuth provider framework (Antigravity full clone + ChatGPT starter)
  * Non-commercial (HXZ License). See LICENCE.
  *
  * Providers:
@@ -14,7 +14,7 @@
  *  1. /login antigravity  -> bot DMs an authorize URL + instructions
  *  2. User opens URL, logs in with Google, Google redirects to
  *     http://localhost:51121/oauth-callback?code=...&state=...
- *     (page will fail to load on their device — that's expected)
+ *     (page will fail to load on their device - that's expected)
  *  3. User copies FULL redirect URL (or just `code`) and pastes back:
  *     /login callback <full_url>   OR   /login code <code>
  *  4. Bot exchanges code -> refresh|projectId, stores in auth.json
@@ -229,7 +229,7 @@ async function exchangeAntigravity(code, stateOrVerifier, projectIdHint = "") {
   } else {
     verifier = s;
   }
-  if (!verifier) throw new Error("Missing PKCE verifier — run /login antigravity again first");
+  if (!verifier) throw new Error("Missing PKCE verifier - run /login antigravity again first");
   const start = Date.now();
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -248,7 +248,7 @@ async function exchangeAntigravity(code, stateOrVerifier, projectIdHint = "") {
     throw new Error(`Token exchange failed HTTP ${res.status}: ${t.slice(0, 300)}`);
   }
   const tok = await res.json().catch(() => ({}));
-  if (!tok.refresh_token) throw new Error("Missing refresh_token — did you use 'prompt=consent'? Try login again");
+  if (!tok.refresh_token) throw new Error("Missing refresh_token - did you use 'prompt=consent'? Try login again");
   let email = "";
   try {
     const u = await fetch("https://www.googleapis.com/oauth2/v1/userinfo?alt=json", {
@@ -280,7 +280,7 @@ function parseRefreshParts(refresh) {
 
 async function refreshAntigravityAccount(acc) {
   const { refreshToken } = parseRefreshParts(acc.refresh || acc.refreshToken || "");
-  if (!refreshToken) throw new Error("Account has no refresh_token — re-login");
+  if (!refreshToken) throw new Error("Account has no refresh_token - re-login");
   const start = Date.now();
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -314,7 +314,7 @@ function tokenExpired(acc, skewMs = 60000) {
 async function getValidAntigravityToken(idx = 0) {
   const a = loadAuthCached();
   const list = a.accounts.antigravity || [];
-  if (!list.length) throw new Error("No Antigravity accounts — run /login antigravity first");
+  if (!list.length) throw new Error("No Antigravity accounts - run /login antigravity first");
   const i = Math.min(Math.max(0, idx || 0), list.length - 1);
   const acc = list[i];
   if (!tokenExpired(acc)) return { token: acc.access, account: acc, index: i };
@@ -343,7 +343,7 @@ async function authorizeChatGPT(config, extra = {}) {
 }
 async function exchangeChatGPT(config, code, verifier) {
   const c = chatgptCfg(config);
-  if (!verifier) throw new Error("Missing verifier — run /login chatgpt first");
+  if (!verifier) throw new Error("Missing verifier - run /login chatgpt first");
   const start = Date.now();
   const res = await fetch(c.tokenUrl, {
     method: "POST",
@@ -371,7 +371,7 @@ async function exchangeChatGPT(config, code, verifier) {
 }
 async function refreshChatGPTAccount(config, acc) {
   const c = chatgptCfg(config);
-  if (!acc.refresh) throw new Error("ChatGPT account has no refresh_token — re-login");
+  if (!acc.refresh) throw new Error("ChatGPT account has no refresh_token - re-login");
   const start = Date.now();
   const res = await fetch(c.tokenUrl, {
     method: "POST",
@@ -391,7 +391,7 @@ async function refreshChatGPTAccount(config, acc) {
 async function getValidChatGPTToken(config, idx = 0) {
   const a = loadAuthCached();
   const list = a.accounts.chatgpt || [];
-  if (!list.length) throw new Error("No ChatGPT accounts — run /login chatgpt first");
+  if (!list.length) throw new Error("No ChatGPT accounts - run /login chatgpt first");
   const i = Math.min(Math.max(0, idx || 0), list.length - 1);
   const acc = list[i];
   if (!tokenExpired(acc)) return { token: acc.access, account: acc, index: i };
@@ -546,7 +546,7 @@ function isThinkingModel(model) {
 async function antigravityChat({ model, messages, tools, temperature, maxTokens, signal, onContent, accountIndex }) {
   const a = loadAuthCached();
   const list = a.accounts.antigravity || [];
-  if (!list.length) throw new Error("No Antigravity accounts — /login antigravity first");
+  if (!list.length) throw new Error("No Antigravity accounts - /login antigravity first");
   const order = list.map((_, i) => (((accountIndex ?? a.activeIndex.antigravity ?? 0) + i) % list.length));
   const { contents, systemInstruction } = openAIMessagesToAntigravity(messages);
   const maxOut = Math.max(Number(maxTokens) || 2048, 2048);

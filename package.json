@@ -1,7 +1,7 @@
 {
   "name": "htg",
   "version": "1.0.0",
-  "description": "Hexzie — HexTelegram AI bot by HexzoNetwork",
+  "description": "Hexzie - HexTelegram AI bot by HexzoNetwork",
   "main": "bot.js",
   "type": "commonjs",
   "scripts": {

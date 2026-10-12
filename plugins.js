@@ -1,5 +1,5 @@
 /**
- * HexTelegram Plugins — dynamic command plugins (CommonJS .js + .zip bundles + URL install)
+ * HexTelegram Plugins - dynamic command plugins (CommonJS .js + .zip bundles + URL install)
  * Non-commercial (HXZ License).
  *
  * Layout:
@@ -402,7 +402,7 @@ function pluginListText() {
   const lines = [`🔌 Plugins (${all.length}):`];
   for (const p of all) {
     const cmds = (p.commands || []).map((c) => `/${c}`).join(" ") || "(no commands)";
-    lines.push(`${p.enabled ? "✅" : "⏸"} \`${p.id}\`${p.version ? ` v${p.version}` : ""} — ${cmds}${p.description ? `\n    ${p.description.slice(0, 120)}` : ""}`);
+    lines.push(`${p.enabled ? "✅" : "⏸"} \`${p.id}\`${p.version ? ` v${p.version}` : ""} - ${cmds}${p.description ? `\n    ${p.description.slice(0, 120)}` : ""}`);
   }
   return lines.join("\n");
 }
