@@ -2348,6 +2348,13 @@ function pluginApiExtras() {
     runTool: (...a) => runTool(...a),
     storage: { get: strGet, list: strList, save: (id, content) => { storage[String(id)] = { content: String(content), updated: Date.now() }; return saveStorage(); } },
     chat: { chatStream, currentProvider, currentChatModel },
+    ask: async (text, callCtx) => {
+      const c = callCtx || {};
+      const cid = c.chat?.id ?? c.from?.id;
+      if (cid === undefined || cid === null) throw new Error("api.ask needs a ctx with chat/from id");
+      await handlePrompt(cid, String(text || "").slice(0, 4000), c);
+      return true;
+    },
   };
 }
 async function handleLogoutCmd(ctx) {
