@@ -39,6 +39,14 @@ module.exports = {
     },
   },
 
+  tools: {
+    shout_text: {
+      description: "Uppercase text. The AI calls this itself when shouting fits.",
+      parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      handler: async (args) => String((args || {}).text || "").toUpperCase().slice(0, 500) || "(empty)",
+    },
+  },
+
   onLoad(api) {
     if (api && api.log) api.log("hello plugin loaded");
   },

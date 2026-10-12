@@ -110,6 +110,164 @@ function extractCommands(mod) {
   return out;
 }
 
+function validTool(name) {
+  return /^[A-Za-z0-9_-]{1,32}$/.test(String(name || ""));
+}
+function toolFullName(id, tool) {
+  return `${id}__${tool}`;
+}
+function extractTools(norm, id) {
+  const out = new Map();
+  const tools = (norm && norm.tools) || {};
+  for (const [raw, val] of Object.entries(tools)) {
+    const short = String(raw || "").trim();
+    if (!validTool(short)) continue;
+    const full = toolFullName(id, short);
+    if (full.length > 64) { console.warn(`[plugins] ${id}: tool '${short}' skipped (full name '${full}' over 64 chars - shorten id or tool)`); continue; }
+    let def = null;
+    if (typeof val === "function") {
+      def = { handler: val, description: "", parameters: { type: "object", properties: {} } };
+    } else if (val && typeof val.handler === "function") {
+      let params = val.parameters;
+      if (typeof params === "string") { try { params = JSON.parse(params); } catch { params = null; } }
+      if (!params || typeof params !== "object") params = { type: "object", properties: {} };
+      def = { handler: val.handler, description: String(val.description || "").slice(0, 500), parameters: params };
+    }
+    if (def) out.set(full, def);
+  }
+  return out;
+}
+function summarizeMod(mod, id) {
+  let m = mod;
+  if (m && m.__esModule && m.default) m = m.default;
+  if (typeof m === "function" && !m.commands) { try { m = m({}) || {}; } catch {} }
+  const handlers = extractCommands(m);
+  const tools = extractTools(m, id);
+  const hooks = extractHooks(m);
+  return {
+    commands: [...handlers.keys()],
+    tools: [...tools.entries()].map(([full, def]) => ({ name: full, description: def.description || "" })),
+    hooks: Object.fromEntries(Object.entries(hooks).map(([k, v]) => [k, v.length])),
+    name: (m && m.name) ? String(m.name).slice(0, 64) : "",
+    description: (m && m.description) ? String(m.description).slice(0, 200) : "",
+    version: (m && m.version) ? String(m.version).slice(0, 32) : "",
+  };
+}
+function findTool(fullName) {
+  const name = String(fullName || "");
+  for (const [id, rec] of loaded.entries()) {
+    if (rec.meta && rec.meta.enabled === false) continue;
+    const def = rec.tools && rec.tools.get(name);
+    if (def) return { id, rec, def };
+  }
+  return null;
+}
+function getToolDefs() {
+  const defs = [];
+  for (const rec of loaded.values()) {
+    if (rec.meta && rec.meta.enabled === false) continue;
+    if (!rec.tools) continue;
+    for (const [full, def] of rec.tools.entries()) {
+      defs.push({ type: "function", function: { name: full, description: def.description || `Plugin tool ${full}`, parameters: def.parameters } });
+    }
+  }
+  return defs;
+}
+async function callTool(fullName, args, ctx, api) {
+  const found = findTool(fullName);
+  if (!found) throw new Error(`unknown plugin tool '${fullName}'`);
+  const useApi = api || _api;
+  const res = await found.def.handler(args || {}, ctx, useApi);
+  if (res === undefined || res === null) return "(plugin tool returned nothing)";
+  return typeof res === "string" ? res : JSON.stringify(res);
+}
+const HOOK_KINDS = ["input", "output", "beforeTool", "afterTool"];
+function extractHooks(norm) {
+  const out = { input: [], output: [], beforeTool: [], afterTool: [] };
+  const hooks = (norm && norm.hooks) || {};
+  for (const kind of HOOK_KINDS) {
+    const v = hooks[kind];
+    const list = Array.isArray(v) ? v : (typeof v === "function" ? [v] : []);
+    for (const fn of list) {
+      if (typeof fn === "function") out[kind].push(fn);
+    }
+  }
+  return out;
+}
+function hookOwners(kind) {
+  const owners = [];
+  for (const [id, rec] of loaded.entries()) {
+    if (rec.meta && rec.meta.enabled === false) continue;
+    const fns = rec.hooks && rec.hooks[kind];
+    if (fns && fns.length) owners.push({ id, rec, fns });
+  }
+  return owners;
+}
+async function transformText(kind, text, ctx, api, strict) {
+  let cur = String(text ?? "");
+  for (const { id, fns } of hookOwners(kind)) {
+    for (const fn of fns) {
+      try {
+        const r = await fn(cur, ctx, api || _api);
+        if (typeof r === "string") cur = r;
+      } catch (e) {
+        const msg = String((e && e.message) || e).slice(0, 300);
+        if (strict) throw new Error(`hook '${kind}' from '${id}' blocked: ${msg}`);
+        console.warn(`[plugins] hook '${kind}' from '${id}' failed (kept previous): ${msg}`);
+      }
+    }
+  }
+  return cur;
+}
+async function transformInput(content, ctx, api) {
+  if (typeof content === "string") return transformText("input", content, ctx, api, true);
+  if (Array.isArray(content)) {
+    const out = [];
+    for (const p of content) {
+      if (p && p.type === "text" && typeof p.text === "string") {
+        out.push({ ...p, text: await transformText("input", p.text, ctx, api, true) });
+      } else out.push(p);
+    }
+    return out;
+  }
+  return content;
+}
+async function transformOutput(text, ctx, api) {
+  return transformText("output", text, ctx, api, false);
+}
+async function runBeforeTool(name, args, ctx, api) {
+  let cur = args || {};
+  for (const { id, fns } of hookOwners("beforeTool")) {
+    for (const fn of fns) {
+      let r;
+      try { r = await fn(name, cur, ctx, api || _api); }
+      catch (e) { return { blocked: String((e && e.message) || e).slice(0, 300) }; }
+      if (r === undefined || r === null) continue;
+      if (typeof r === "string") return { blocked: r.slice(0, 300) };
+      if (typeof r === "object") {
+        if (typeof r.block === "string" && r.block) return { blocked: r.block.slice(0, 300) };
+        if (r.block === true) return { blocked: `blocked by '${id}'` };
+        if (r.args && typeof r.args === "object") cur = r.args;
+      }
+    }
+  }
+  return { args: cur };
+}
+async function runAfterTool(name, args, result, ctx, api) {
+  let cur = String(result ?? "");
+  for (const { id, fns } of hookOwners("afterTool")) {
+    for (const fn of fns) {
+      try {
+        const r = await fn(name, args, cur, ctx, api || _api);
+        if (typeof r === "string") cur = r;
+      } catch (e) {
+        console.warn(`[plugins] afterTool from '${id}' failed (kept previous): ${String((e && e.message) || e).slice(0, 200)}`);
+      }
+    }
+  }
+  return cur;
+}
+
 function buildApi(bot, config, extras = {}) {
   return Object.assign({
     bot,
@@ -152,11 +310,15 @@ function loadOne(id, reg, api) {
       }
     }
     const handlers = extractCommands(norm);
-    const rec = { mod: norm, meta, handlers, entry };
+    const tools = extractTools(norm, id);
+    const hooks = extractHooks(norm);
+    const rec = { mod: norm, meta, handlers, tools, hooks, entry };
     if (norm && typeof norm.onLoad === "function") {
       try { norm.onLoad(api); } catch (e) { console.warn(`[plugins] ${id} onLoad: ${e.message}`); }
     }
     meta.commands = [...handlers.keys()];
+    meta.tools = [...tools.entries()].map(([full, def]) => ({ name: full, description: def.description || "" }));
+    meta.hooks = Object.fromEntries(Object.entries(hooks).map(([k, v]) => [k, v.length]));
     if (!meta.name && norm && norm.name) meta.name = String(norm.name).slice(0, 64);
     if (!meta.description && norm && norm.description) meta.description = String(norm.description).slice(0, 200);
     if (!meta.version && norm && norm.version) meta.version = String(norm.version).slice(0, 32);
@@ -249,6 +411,8 @@ function listPlugins() {
     description: m.description || "",
     enabled: m.enabled !== false,
     commands: m.commands || [],
+    tools: m.tools || [],
+    hooks: m.hooks || {},
     file: m.file || "",
     addedAt: m.addedAt || 0,
     source: m.source || "",
@@ -317,21 +481,19 @@ async function installFromBuffer({ id, buf, filename, source }) {
     const code = (() => { try { return fs.readFileSync(resolveFolderEntry(destDir), "utf8"); } catch { return ""; } })();
     if (code.length > 2000000) { try { fs.rmSync(destDir, { recursive: true, force: true }); } catch {} return { error: "Plugin too large" }; }
     const flags = safetyScan(code);
-    reg[id] = { id, file: id, name: id, version: "", description: "", enabled: true, commands: [], addedAt: Date.now(), source: source || "zip" };
+    reg[id] = { id, file: id, name: id, version: "", description: "", enabled: true, commands: [], tools: [], addedAt: Date.now(), source: source || "zip" };
     if (_api) loadOne(id, reg, _api);
     else {
       try {
         const entry = resolveFolderEntry(destDir);
         if (entry) {
           clearRequireCache(entry);
-          let mod = require(entry);
-          if (mod && mod.__esModule && mod.default) mod = mod.default;
-          if (typeof mod === "function" && !mod.commands) { try { mod = mod({}) || {}; } catch {} }
-          const handlers = extractCommands(mod);
-          reg[id].commands = [...handlers.keys()];
-          if (mod && mod.name) reg[id].name = String(mod.name).slice(0, 64);
-          if (mod && mod.description) reg[id].description = String(mod.description).slice(0, 200);
-          if (mod && mod.version) reg[id].version = String(mod.version).slice(0, 32);
+          const s = summarizeMod(require(entry), id);
+          reg[id].commands = s.commands;
+          reg[id].tools = s.tools;
+          if (s.name) reg[id].name = s.name;
+          if (s.description) reg[id].description = s.description;
+          if (s.version) reg[id].version = s.version;
           try { clearRequireCache(entry); } catch {}
         }
       } catch {}
@@ -339,7 +501,7 @@ async function installFromBuffer({ id, buf, filename, source }) {
     saveRegistry(reg);
     const rec = loaded.get(id);
     if (rec && rec.meta) { reg[id] = rec.meta; saveRegistry(reg); }
-    return { ok: true, id, commands: (reg[id] && reg[id].commands) || [], flags };
+    return { ok: true, id, commands: (reg[id] && reg[id].commands) || [], tools: (reg[id] && reg[id].tools) || [], flags };
   } else {
     if (buf.length > MAX_PLUGIN_BYTES) return { error: `File too big (${buf.length}B > 500KB)` };
     if (!/\.js$/i.test(name) && !/\.cjs$/i.test(name)) return { error: "Only .js plugins supported (or .zip bundle)" };
@@ -351,26 +513,24 @@ async function installFromBuffer({ id, buf, filename, source }) {
     const flags = safetyScan(code);
     const dest = path.join(PLUGINS_DIR, `${id}.js`);
     try { fs.writeFileSync(dest, code); } catch (e) { return { error: `Write failed: ${e.message}` }; }
-    reg[id] = { id, file: `${id}.js`, name: id, version: "", description: "", enabled: true, commands: [], addedAt: Date.now(), source: source || "file" };
+    reg[id] = { id, file: `${id}.js`, name: id, version: "", description: "", enabled: true, commands: [], tools: [], addedAt: Date.now(), source: source || "file" };
     if (_api) loadOne(id, reg, _api);
     else {
       try {
         clearRequireCache(dest);
-        let mod = require(dest);
-        if (mod && mod.__esModule && mod.default) mod = mod.default;
-        if (typeof mod === "function" && !mod.commands) { try { mod = mod({}) || {}; } catch {} }
-        const handlers = extractCommands(mod);
-        reg[id].commands = [...handlers.keys()];
-        if (mod && mod.name) reg[id].name = String(mod.name).slice(0, 64);
-        if (mod && mod.description) reg[id].description = String(mod.description).slice(0, 200);
-        if (mod && mod.version) reg[id].version = String(mod.version).slice(0, 32);
+        const s = summarizeMod(require(dest), id);
+        reg[id].commands = s.commands;
+        reg[id].tools = s.tools;
+        if (s.name) reg[id].name = s.name;
+        if (s.description) reg[id].description = s.description;
+        if (s.version) reg[id].version = s.version;
         try { clearRequireCache(dest); } catch {}
       } catch {}
     }
     saveRegistry(reg);
     const rec = loaded.get(id);
     if (rec && rec.meta) { reg[id] = rec.meta; saveRegistry(reg); }
-    return { ok: true, id, commands: (reg[id] && reg[id].commands) || [], flags };
+    return { ok: true, id, commands: (reg[id] && reg[id].commands) || [], tools: (reg[id] && reg[id].tools) || [], flags };
   }
 }
 
@@ -402,7 +562,9 @@ function pluginListText() {
   const lines = [`🔌 Plugins (${all.length}):`];
   for (const p of all) {
     const cmds = (p.commands || []).map((c) => `/${c}`).join(" ") || "(no commands)";
-    lines.push(`${p.enabled ? "✅" : "⏸"} \`${p.id}\`${p.version ? ` v${p.version}` : ""} - ${cmds}${p.description ? `\n    ${p.description.slice(0, 120)}` : ""}`);
+    const tools = (p.tools || []).map((t) => t.name || t).join(" ");
+    const hookCount = Object.values(p.hooks || {}).reduce((s, n) => s + (Number(n) || 0), 0);
+    lines.push(`${p.enabled ? "✅" : "⏸"} \`${p.id}\`${p.version ? ` v${p.version}` : ""} - ${cmds}${tools ? ` (+${(p.tools || []).length} tools: ${tools})` : ""}${hookCount ? ` (+${hookCount} hooks)` : ""}${p.description ? `\n    ${p.description.slice(0, 120)}` : ""}`);
   }
   return lines.join("\n");
 }
@@ -442,6 +604,15 @@ module.exports = {
   listPlugins,
   pluginListText,
   findCommand,
+  findTool,
+  getToolDefs,
+  callTool,
+  HOOK_KINDS,
+  transformInput,
+  transformOutput,
+  runBeforeTool,
+  runAfterTool,
+  summarizeMod,
   installFromBuffer,
   installFromUrl,
   middleware,

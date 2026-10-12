@@ -96,6 +96,13 @@ function buildSystem(memorySummary) {
   let s = SHORT_PROMPT;
   if (config.systemPrompt && config.systemPrompt.trim()) s = `${config.systemPrompt.trim()}\n${s}`;
   if (memorySummary) s += `\nConversation memory (auto-summary, older turns compressed): ${memorySummary}`.slice(0, 1500);
+  try {
+    const pt = plugins.getToolDefs();
+    if (pt.length) {
+      s += "\nPlugin tools (installed by owner, you operate them like any tool - think first, then call):\n" +
+        pt.map((d) => `- ${d.function.name}: ${(d.function.description || "").slice(0, 160)}`).join("\n").slice(0, 1200);
+    }
+  } catch {}
   return s;
 }
 function saveConfig() {
@@ -595,6 +602,14 @@ const TOOL_DEFS = [
   { type: "function", function: { name: "store_rename", description: "Rename an AI storage entry (old id -> new id).", parameters: { type: "object", properties: { id: { type: "string" }, new_id: { type: "string" } }, required: ["id", "new_id"] } } },
 ];
 
+function activeTools() {
+  try {
+    const extra = plugins.getToolDefs();
+    if (extra && extra.length) return TOOL_DEFS.concat(extra);
+  } catch {}
+  return TOOL_DEFS;
+}
+
 function shellAllowed(cmd) {
   const sh = config.shell || {};
   if (sh.allowedCommands && sh.allowedCommands.length) {
@@ -633,7 +648,8 @@ const TOOL_USAGE_EXAMPLES = {
 };
 function toolUsageHint(name) {
   if (TOOL_USAGE_EXAMPLES[name]) return `Usage: ${TOOL_USAGE_EXAMPLES[name]}`;
-  const def = TOOL_DEFS.find((d) => d?.function?.name === name);
+  let def = TOOL_DEFS.find((d) => d?.function?.name === name);
+  if (!def) { try { def = plugins.getToolDefs().find((d) => d?.function?.name === name); } catch {} }
   const props = def?.function?.parameters?.properties || {};
   const required = def?.function?.required || Object.keys(props);
   if (!required.length) return `Usage: ${name}({}) - takes no required args`;
@@ -644,10 +660,18 @@ function toolUsageHint(name) {
   }
   return `Usage: ${name}(${JSON.stringify(ex)}) - required: ${required.join(", ")}`;
 }
-async function runTool(name, args, ctx) {
+async function runToolInner(name, args, ctx) {
   const curChat = String(ctx.chat?.id ?? ctx.from?.id ?? "");
   const chatId = (t) => String(t || curChat);
   try {
+    try {
+      if (plugins.findTool(name)) {
+        const out = await plugins.callTool(name, args || {}, ctx, pluginApiExtras());
+        return String(out ?? "(plugin tool returned nothing)").slice(0, 8000);
+      }
+    } catch (e) {
+      return `TOOL ERROR: plugin tool '${name}' failed: ${String(e.message || e).slice(0, 500)}`;
+    }
     const def = TOOL_DEFS.find((d) => d?.function?.name === name);
     const required = def?.function?.required || [];
     const missing = required.filter((k) => {
@@ -974,6 +998,23 @@ async function runTool(name, args, ctx) {
     });
   });
 }
+async function runTool(name, args, ctx) {
+  const api = pluginApiExtras();
+  try {
+    const pre = await plugins.runBeforeTool(name, args || {}, ctx, api);
+    if (pre && pre.blocked) return `BLOCKED: ${pre.blocked}`;
+    if (pre && pre.args) args = pre.args;
+  } catch (e) {
+    return `BLOCKED: ${String(e.message || e).slice(0, 300)}`;
+  }
+  let result = await runToolInner(name, args, ctx);
+  try {
+    result = await plugins.runAfterTool(name, args || {}, result, ctx, api);
+  } catch (e) {
+    console.warn(`[hooks] afterTool failed: ${e.message}`);
+  }
+  return result;
+}
 
 try {
   const _pl = plugins.loadAll(bot, config, pluginApiExtras());
@@ -994,6 +1035,7 @@ const pickTip = () => {
   return "Ask me anything!";
 };
 function actionLabel(name, args) {
+  try { if (plugins.findTool(name)) return `🔌 Plugin ${name}`; } catch {}
   const a = args || {};
   switch (name) {
     case "web_check": return `🔍 Checking site ${a.url || ""}`;
@@ -1299,6 +1341,12 @@ function drainSideNotes(chatId, messages) {
   return Math.min(q.length, 5);
 }
 async function handlePrompt(chatId, userContent, ctx) {
+  try {
+    userContent = await plugins.transformInput(userContent, ctx, pluginApiExtras());
+  } catch (e) {
+    try { await ctx.reply(`⛔ ${String(e.message || e).slice(0, 300)}`); } catch {}
+    return;
+  }
   pushHistory(chatId, "user", userContent);
   const memSummary = memoryStore[chatId]?.summary || "";
   const messages = [{ role: "system", content: buildSystem(memSummary) }, ...conversations.get(chatId)];
@@ -1350,7 +1398,7 @@ async function handlePrompt(chatId, userContent, ctx) {
     if (drained) { dbg(`injected ${drained} btw note(s) before round ${round}`); }
     let r;
     try {
-      r = await chatStream(messages, TOOL_DEFS, null, undefined, true, noteThought);
+      r = await chatStream(messages, activeTools(), null, undefined, true, noteThought);
     } catch (e) {
       if (isStale()) { dbg("abort on error path (stale)"); break; }
       const msg1 = String(e.message || e);
@@ -1361,7 +1409,7 @@ async function handlePrompt(chatId, userContent, ctx) {
         try {
           await sleep(2000);
           if (isStale()) break;
-          r = await chatStream(messages, TOOL_DEFS, null, undefined, false, noteThought);
+          r = await chatStream(messages, activeTools(), null, undefined, false, noteThought);
         } catch (e2) {
           dbg("non-retriable, giving up:", String(e2.message || e2).slice(0, 160));
           clearInterval(liveTicker);
@@ -1381,7 +1429,7 @@ async function handlePrompt(chatId, userContent, ctx) {
           await sleep(wait);
           if (isStale()) break;
           try {
-            r = await chatStream(messages, TOOL_DEFS, null, undefined, attempt < 2, noteThought);
+            r = await chatStream(messages, activeTools(), null, undefined, attempt < 2, noteThought);
             lastErr = null; ok = true;
             dbg(`retry ${attempt} succeeded`);
             break;
@@ -1403,7 +1451,7 @@ async function handlePrompt(chatId, userContent, ctx) {
       dbg("empty content, no tools - one retry (non-stream)…");
       await showProg();
       try {
-        const r2 = await chatStream(messages, TOOL_DEFS, null, undefined, false, noteThought);
+        const r2 = await chatStream(messages, activeTools(), null, undefined, false, noteThought);
         if ((r2.content || "").trim() || (r2.toolCalls || []).length) r = r2;
         else { dbg("retry also empty - finalizing"); }
       } catch (e) { dbg("empty-retry failed:", String(e.message || e).slice(0, 120)); }
@@ -1473,10 +1521,16 @@ async function handlePrompt(chatId, userContent, ctx) {
     }
     const answer = (r.content || "").trim() || "(empty reply)";
     dbg("final answer len:", answer.length);
-    pushHistory(chatId, "assistant", answer);
+    let deliver = answer;
+    try {
+      deliver = await plugins.transformOutput(answer, ctx, pluginApiExtras());
+    } catch (e) {
+      console.warn(`[hooks] output transform failed: ${e.message}`);
+    }
+    pushHistory(chatId, "assistant", deliver);
     clearInterval(liveTicker);
     if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
-    await finalizeStream(ctx, prog, answer);
+    await finalizeStream(ctx, prog, deliver);
     return;
   }
   clearInterval(liveTicker);
@@ -2376,7 +2430,7 @@ bot.command("plugin", async (ctx) => {
     }
     const flags = (res.flags || []).length ? `\n⚠️ Flags: ${res.flags.join(", ")}` : "";
     await safeEdit(ctx, m.chat.id, m.message_id,
-      `✅ Plugin \`${res.id}\` installed (${(res.commands || []).length} command(s): ${(res.commands || []).map((c) => "/" + c).join(" ") || "(none)"})${flags}\n/manage: /pl ls • /pl info ${res.id}`);
+      `✅ Plugin \`${res.id}\` installed (${(res.commands || []).length} command(s): ${(res.commands || []).map((c) => "/" + c).join(" ") || "(none)"} + ${((res.tools || []).length)} agent tool(s))${flags}\n/manage: /pl ls • /pl info ${res.id}`);
     return;
   }
   if (!ctx.message?.reply_to_message?.document) {
@@ -2398,7 +2452,7 @@ bot.command("plugin", async (ctx) => {
   }
   const flags = (res.flags || []).length ? `\n⚠️ Flags: ${res.flags.join(", ")}` : "";
   await safeEdit(ctx, m.chat.id, m.message_id,
-    `✅ Plugin \`${res.id}\` installed (${(res.commands || []).length} command(s): ${(res.commands || []).map((c) => "/" + c).join(" ") || "(none)"})${flags}\nManage: /pl ls • /pl info ${res.id}`);
+    `✅ Plugin \`${res.id}\` installed (${(res.commands || []).length} command(s): ${(res.commands || []).map((c) => "/" + c).join(" ") || "(none)"} + ${((res.tools || []).length)} agent tool(s))${flags}\nManage: /pl ls • /pl info ${res.id}`);
 });
 
 bot.command("pl", async (ctx) => {
@@ -2421,7 +2475,7 @@ bot.command("pl", async (ctx) => {
     const all = plugins.listPlugins();
     const p = all.find((x) => x.id === arg);
     if (!p) return ctx.reply(`⚠️ No plugin \`${arg}\``, { parse_mode: "Markdown" });
-    return ctx.reply(`🔌 \`${p.id}\` v${p.version || "?"} ${p.enabled ? "✅" : "⏸"}\nName: ${p.name}\nFile: \`${p.file}\`\nCommands: ${(p.commands || []).map((c) => "/" + c).join(" ") || "(none)"}\nSource: ${p.source || "?"}\n${p.description || ""}`.slice(0, 1500), { parse_mode: "Markdown" });
+    return ctx.reply(`🔌 \`${p.id}\` v${p.version || "?"} ${p.enabled ? "✅" : "⏸"}\nName: ${p.name}\nFile: \`${p.file}\`\nCommands: ${(p.commands || []).map((c) => "/" + c).join(" ") || "(none)"}\nAgent tools: ${((p.tools || []).map((t) => t.name).join(" ")) || "(none) - the AI can think and call these"}\nSource: ${p.source || "?"}\n${p.description || ""}`.slice(0, 1500), { parse_mode: "Markdown" });
   }
   if (sub === "on" || sub === "enable" || sub === "off" || sub === "disable") {
     if (!arg) return ctx.reply(`Usage: /pl ${sub} <id>`);
