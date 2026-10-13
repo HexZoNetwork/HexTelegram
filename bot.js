@@ -95,6 +95,7 @@ const SHORT_PROMPT =
   "(2c) Attached files: user message may include '[Attached ...]' with saved /tmp path + extracted content, or an image via vision. Summarize/answer DIRECTLY, no tools needed. file_read on the /tmp path only if you need more. NEVER run shell to fetch tokens/secrets. " +
   "(3) Image generation is DISABLED: if user asks to draw/make/create an image, say plainly it is turned off. NEVER call tools for it. " +
   "(4) Skill details: call read_skill(section) with a section name below, read result, act. " +
+  "(4b) TOOL JSON MUST BE COMPLETE: every tool call emits full valid JSON with ALL required args in ONE turn - never {} or half-cut strings. file_write/file_edit content <=1500 chars per call; split bigger files (write chunk 1, then append via file_edit). " +
   "(5) You ALWAYS know the current chat: a context block gives chat id/type/title, sender, reply/forward info. " +
   "'this group/chat' = that chat id - call tg_get_chat on it to inspect, never ask the user for the id. " +
   "Sections: sites | messaging | images | telegram-api | style | access | plugins. Reply concisely, Telegram-friendly." +
@@ -695,7 +696,7 @@ function toolUsageHint(name) {
   let def = TOOL_DEFS.find((d) => d?.function?.name === name);
   if (!def) { try { def = plugins.getToolDefs().find((d) => d?.function?.name === name); } catch {} }
   const props = def?.function?.parameters?.properties || {};
-  const required = def?.function?.required || Object.keys(props);
+  const required = def?.function?.parameters?.required || def?.function?.required || Object.keys(props);
   if (!required.length) return `Usage: ${name}({}) - takes no required args`;
   const ex = {};
   for (const k of required) {
@@ -816,7 +817,7 @@ async function runToolInner(name, args, ctx) {
       return `TOOL ERROR: plugin tool '${name}' failed: ${String(e.message || e).slice(0, 500)}`;
     }
     const def = TOOL_DEFS.find((d) => d?.function?.name === name);
-    const required = def?.function?.required || [];
+    const required = def?.function?.parameters?.required || def?.function?.required || [];
     const missing = required.filter((k) => {
       const v = args?.[k];
       return v === undefined || v === null || String(v).trim() === "";
@@ -1518,6 +1519,7 @@ async function handlePrompt(chatId, userContent, ctx) {
   let emptyRetries = 0;
   const failStreak = { key: null, count: 0 };
   let blockedSig = null;
+  let truncStreak = 0;
   const mySeq = ++reqCounter;
   activeReq.set(chatId, mySeq);
   const isStale = () => activeReq.get(chatId) !== mySeq;
@@ -1640,18 +1642,30 @@ async function handlePrompt(chatId, userContent, ctx) {
       }
       messages.push({ role: "assistant", content: r.content || "", tool_calls: r.toolCalls });
       let brokeLoop = false;
+      let truncatedHit = false;
       for (const tc of r.toolCalls) {
         if (isStale()) break;
         const tname = tc.function?.name || "?";
+        const rawArgs = tc.function?.arguments ?? "";
+        const rawLen = String(rawArgs || "").length;
         let args = {};
-        try { args = JSON.parse(tc.function?.arguments || "{}"); } catch {}
-        dbg("tool start:", tname, JSON.stringify(args).slice(0, 160));
+        let argsOk = true;
+        try { args = JSON.parse(rawArgs || "{}"); } catch { argsOk = false; args = {}; }
+        const truncated = !argsOk || (r.finishReason === "length" && rawLen <= 2);
+        dbg("tool start:", tname, `raw_len=${rawLen} parse=${argsOk ? "ok" : "FAIL"} finish=${r.finishReason || "-"}`, JSON.stringify(args).slice(0, 160));
         st.action = actionLabel(tname, args);
         st.status = "Running tool";
         st.tool = tname;
         await showProg();
-        const result = await runTool(tname, args, ctx);
-        dbg("tool done:", tname, String(result).slice(0, 160));
+        let result;
+        if (truncated) {
+          truncatedHit = true;
+          result = `ERROR: truncated tool call (finish=${r.finishReason || "?"}, args JSON incomplete, got ${rawLen} chars, parse ${argsOk ? "ok" : "failed"}). You hit the output limit - retry with COMPLETE JSON and SMALLER content. ${toolUsageHint(tname)}. Rules: never emit {} or half-JSON; for file_write keep content <=1500 chars per call (first chunk file_write, rest via file_edit appends, or write /tmp/partN + shell cat >>); for other tools fill ALL required args in one call.`;
+          dbg("tool done:", tname, String(result).slice(0, 160));
+        } else {
+          result = await runTool(tname, args, ctx);
+          dbg("tool done:", tname, String(result).slice(0, 160));
+        }
         if (isStale()) break;
         const ok = !/^(TG ERROR|TOOL ERROR|ERROR|BLOCKED|IMAGE FAILED)/.test(String(result));
         st.action = `${ok ? "✅" : "⚠️"} ${tname} ${ok ? "done" : "failed"}`;
@@ -1666,7 +1680,7 @@ async function handlePrompt(chatId, userContent, ctx) {
           if (failStreak.count >= 2) {
             dbg(`breaker: ${tname} failed ${failStreak.count}x with identical args - coaching usage`);
             blockedSig = sig;
-            messages.push({ role: "user", content: `SYSTEM: your last ${tname} call failed like this: ${errLine}. ${toolUsageHint(tname)}. Now call ${tname} again WITH correct arguments filled in (use a sensible path if the user didn't give one, e.g. /tmp/output.txt). Only if you truly cannot guess a required value, ask the user for it and end your turn with NO further tool calls.` });
+            messages.push({ role: "user", content: `SYSTEM: your last ${tname} call failed like this: ${errLine}. ${toolUsageHint(tname)}. You MUST now call ${tname} again with COMPLETE JSON - every required arg filled with a real value in a single call (never {} or half-JSON). For file_write/file_edit keep content <=1500 chars per call and split large files (first chunk file_write, rest via file_edit appends). Use a sensible path if the user didn't give one, e.g. /tmp/output.txt. Only if you truly cannot guess a required value, ask the user for it and end your turn with NO further tool calls.` });
             brokeLoop = true;
             break;
           }
@@ -1674,6 +1688,21 @@ async function handlePrompt(chatId, userContent, ctx) {
           failStreak.key = null;
           failStreak.count = 0;
         }
+      }
+      if (truncatedHit && !brokeLoop) {
+        truncStreak++;
+        if (truncStreak >= 3) {
+          dbg(`breaker: truncated ${truncStreak}x in a row - finalizing to stop growth`);
+          clearInterval(liveTicker);
+          if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
+          await finalizeStream(ctx, prog, "⚠️ The file content is too large to write in one go (output limit hit 3x). Tell me the file path + a smaller chunk (or split it into parts) and I'll write it piece by piece.");
+          return;
+        }
+        dbg(`breaker: truncated tool args (finish=${r.finishReason || "?"}) - coaching full params + split`);
+        messages.push({ role: "user", content: `SYSTEM: your last tool call was TRUNCATED (finish_reason=${r.finishReason || "?"}, output limit hit) so its arguments arrived incomplete. Next: re-emit the SAME call with COMPLETE JSON in one turn, but SMALLER - for file_write/file_edit keep content <=1500 chars per call and split the file across multiple calls. Never emit {} or cut JSON mid-string. ${toolUsageHint(r.toolCalls?.[0]?.function?.name || "file_write")}` });
+        brokeLoop = true;
+      } else if (!truncatedHit) {
+        truncStreak = 0;
       }
       if (brokeLoop) continue;
       if (isStale()) { dbg("abort after tools (superseded)"); break; }
