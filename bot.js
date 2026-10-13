@@ -240,8 +240,9 @@ bot.use((ctx, next) => {
 bot.use(plugins.middleware());
 
 
-async function chatStream(messages, tools, onContent, signal, useStream = true, onThought) {
+async function chatStream(messages, tools, onContent, signal, useStream = true, onThought, opts = {}) {
   const prov = currentProvider();
+  const maxTok = opts?.maxTokens ?? config.maxTokens ?? 2048;
   if (prov === "antigravity") {
     if (config.debugLog) console.log(`[api] antigravity model=${currentChatModel()} msgs=${messages.length} tools=${tools?.length || 0}`);
     return auth.antigravityChat({
@@ -249,19 +250,19 @@ async function chatStream(messages, tools, onContent, signal, useStream = true, 
       messages,
       tools,
       temperature: config.temperature ?? 0.7,
-      maxTokens: config.maxTokens ?? 2048,
+      maxTokens: maxTok,
       signal,
       onContent,
     });
   }
   if (prov === "chatgpt") {
-    return chatStreamChatGPT(messages, tools, onContent, signal, useStream, onThought);
+    return chatStreamChatGPT(messages, tools, onContent, signal, useStream, onThought, opts);
   }
   const body = {
     model: config.model,
     messages,
     temperature: config.temperature ?? 0.7,
-    max_tokens: config.maxTokens ?? 2048,
+    max_tokens: maxTok,
     stream: useStream,
   };
   if (tools && tools.length) body.tools = tools;
@@ -423,7 +424,7 @@ async function chatStream(messages, tools, onContent, signal, useStream = true, 
   return { content, toolCalls: [...toolByIndex.values()], finishReason, aborted };
 }
 
-async function chatStreamChatGPT(messages, tools, onContent, signal, useStream = true, onThought) {
+async function chatStreamChatGPT(messages, tools, onContent, signal, useStream = true, onThought, opts = {}) {
   const cfg = (config.auth && config.auth.chatgpt) || {};
   const baseURL = String(cfg.baseURL || auth.CHATGPT_DEFAULTS.baseURL).replace(/\/$/, "");
   const model = String(cfg.model || config.model || "gpt-4o-mini");
@@ -442,7 +443,7 @@ async function chatStreamChatGPT(messages, tools, onContent, signal, useStream =
     model,
     messages,
     temperature: config.temperature ?? 0.7,
-    max_tokens: config.maxTokens ?? 2048,
+    max_tokens: opts?.maxTokens ?? config.maxTokens ?? 2048,
     stream: useStream,
   };
   if (tools && tools.length) body.tools = tools;
@@ -1452,7 +1453,7 @@ function replyThreadOpts(ctx, extra = {}) {
 }
 async function finalizeDraft(ctx, draftId, fullText) {
   stoppedDrafts.delete(draftId);
-  const text = String(fullText || "").trim() || "(empty reply)";
+  const text = String(fullText || "").trim() || "⚠️ The model returned an empty response - try again, shorten the request, or send /new to clear history.";
   for (const chunk of splitTG(text)) {
     try {
       if (STREAM.richFinal) await ctx.reply(chunk.slice(0, 4000), replyThreadOpts(ctx, { parse_mode: "Markdown" }));
@@ -1473,7 +1474,7 @@ async function finalizeStream(ctx, msg, fullText) {
     return;
   }
   if (!text) {
-    await safeEdit(ctx, msg.chat.id, msg.message_id, "(empty reply)");
+    await safeEdit(ctx, msg.chat.id, msg.message_id, "⚠️ The model returned an empty response - try again, shorten the request, or send /new to clear history.");
     return;
   }
   const chunks = splitTG(text);
@@ -1505,6 +1506,18 @@ function drainSideNotes(chatId, messages) {
   }
   return Math.min(q.length, 5);
 }
+function compactForRetry(messages, keep = 8) {
+  if (!Array.isArray(messages) || messages.length <= keep + 1) return 0;
+  const sys = messages[0];
+  let rest = messages.slice(1).slice(-keep);
+  while (rest.length && rest[0].role === "tool") rest.shift();
+  while (rest.length && rest[0].role === "assistant" && rest[0].tool_calls && !(rest[1] && rest[1].role === "tool")) rest.shift();
+  const dropped = messages.length - (1 + rest.length);
+  if (dropped <= 0) return 0;
+  messages.length = 0;
+  messages.push(sys, ...rest);
+  return dropped;
+}
 async function handlePrompt(chatId, userContent, ctx) {
   try {
     userContent = await plugins.transformInput(userContent, ctx, pluginApiExtras());
@@ -1516,7 +1529,6 @@ async function handlePrompt(chatId, userContent, ctx) {
   const memSummary = memoryStore[chatId]?.summary || "";
   const messages = [{ role: "system", content: buildSystem(memSummary) }, ...conversations.get(chatId)];
   const hardCap = config.maxToolRounds;
-  let emptyRetries = 0;
   const failStreak = { key: null, count: 0 };
   let blockedSig = null;
   let truncStreak = 0;
@@ -1612,15 +1624,33 @@ async function handlePrompt(chatId, userContent, ctx) {
       }
     }
     if (isStale()) { dbg("abort after API (superseded)"); break; }
-    if (!(r.toolCalls || []).length && !(r.content || "").trim() && !emptyRetries) {
-      emptyRetries++;
-      dbg("empty content, no tools - one retry (non-stream)…");
-      await showProg();
-      try {
-        const r2 = await chatStream(messages, activeTools(), null, undefined, false, noteThought);
-        if ((r2.content || "").trim() || (r2.toolCalls || []).length) r = r2;
-        else { dbg("retry also empty - finalizing"); }
-      } catch (e) { dbg("empty-retry failed:", String(e.message || e).slice(0, 120)); }
+    if (!(r.toolCalls || []).length && !(r.content || "").trim()) {
+      let recovered = false;
+      for (let e = 0; e < 3 && !recovered; e++) {
+        const dropped = compactForRetry(messages, e === 0 ? 8 : 5);
+        const bigger = Math.min((config.maxTokens ?? 2048) * (e + 1), 8192);
+        const useTools = e < 2 ? activeTools() : null;
+        dbg(`empty result (finish=${r.finishReason || "?"}) - recovery ${e + 1}/3: dropped ${dropped} msgs, maxTokens=${bigger}, tools=${useTools ? useTools.length : 0}`);
+        await showProg();
+        try {
+          const r2 = await chatStream(messages, useTools, null, undefined, false, noteThought, { maxTokens: bigger });
+          if ((r2.content || "").trim() || (r2.toolCalls || []).length) {
+            r = r2; recovered = true;
+            dbg(`recovery ${e + 1} got content len=${(r2.content || "").length} tools=${(r2.toolCalls || []).length}`);
+          } else {
+            dbg(`recovery ${e + 1} still empty (finish=${r2.finishReason || "?"})`);
+          }
+        } catch (e2) { dbg(`recovery ${e + 1} failed:`, String(e2.message || e2).slice(0, 120)); }
+        if (isStale()) break;
+      }
+      if (!recovered && !isStale()) {
+        dbg("all empty-recoveries failed - finalizing honestly");
+        clearInterval(liveTicker);
+        if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
+        await finalizeStream(ctx, prog, "⚠️ The model keeps returning an empty response (output/context limit hit). Try a shorter request, or send /new to clear history and retry.");
+        return;
+      }
+      if (isStale()) { dbg("abort after empty-recovery (superseded)"); break; }
     }
     if (r.toolCalls?.length) {
       dbg(`round ${round}: tools`, r.toolCalls.map((t) => t.function?.name).join(","));
@@ -1712,7 +1742,7 @@ async function handlePrompt(chatId, userContent, ctx) {
       await showProg();
       continue;
     }
-    const answer = (r.content || "").trim() || "(empty reply)";
+    const answer = (r.content || "").trim() || "⚠️ The model returned an empty response - try again, shorten the request, or send /new to clear history.";
     dbg("final answer len:", answer.length);
     let deliver = answer;
     try {
