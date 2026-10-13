@@ -184,10 +184,10 @@ func toolFileEdit(args map[string]any) string {
 		return "ERROR: empty path"
 	}
 	if oldS == "" {
-		return "ERROR: empty old_string — provide the exact text to replace"
+		return "ERROR: empty old_string - provide the exact text to replace"
 	}
 	if !hasNew {
-		return "ERROR: missing new_string — provide replacement text (empty string allowed for deletion)"
+		return "ERROR: missing new_string - provide replacement text (empty string allowed for deletion)"
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
@@ -199,7 +199,7 @@ func toolFileEdit(args map[string]any) string {
 		return "ERROR: old_string not found in " + p
 	}
 	if count > 1 && !replaceAll {
-		return fmt.Sprintf("ERROR: old_string found %d times in %s — provide more surrounding context to make it unique, or set replace_all=true", count, p)
+		return fmt.Sprintf("ERROR: old_string found %d times in %s - provide more surrounding context to make it unique, or set replace_all=true", count, p)
 	}
 	if replaceAll {
 		content = strings.ReplaceAll(content, oldS, newS)
@@ -486,7 +486,7 @@ req.Header.Set("User-Agent", "hextelegram/web_check (+telegram)")
 		fmt.Fprintf(&sb, "SNIPPET: %s\n", text)
 	}
 	if resp.StatusCode >= 400 {
-		sb.WriteString("NOTE: site returned an error status — do NOT invent content; report it as down/error.\n")
+		sb.WriteString("NOTE: site returned an error status - do NOT invent content; report it as down/error.\n")
 	}
 	return sb.String()
 }

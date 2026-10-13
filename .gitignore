@@ -1,9 +1,16 @@
 config.json
+auth.json
+plugins.json
+plugins/*.js
+plugins/*/
+!plugins/.gitkeep
+!plugins/*.example
 memory.json
 history.json
 models_cache.json
 storage.json
-node_modules/
+node_modules/*
+node_modules
 storage.json
 tools
 shots/

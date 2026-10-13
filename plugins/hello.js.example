@@ -1,0 +1,53 @@
+/**
+ * Hello - example HexTelegram plugin (HXZ License, non-commercial).
+ * Install: reply to this file with /plugin  (or /plugin <url>)
+ * Try: /hello , /ping , /echo <text>
+ */
+"use strict";
+
+module.exports = {
+  name: "hello",
+  version: "1.0.0",
+  description: "Example plugin - hello/ping/echo commands.",
+
+  commands: {
+    hello: {
+      description: "Say hello",
+      usage: "/hello [name]",
+      handler: async (ctx, args) => {
+        const name = String(args || "").trim().slice(0, 50) || (ctx.from && ctx.from.first_name) || "there";
+        await ctx.reply(`👋 Hello, ${name}! (from plugin \`hello\`)`, { parse_mode: "Markdown" });
+      },
+    },
+    ping: async (ctx) => {
+      const t0 = Date.now();
+      const m = await ctx.reply("🏓 pong…");
+      try {
+        await ctx.telegram.editMessageText(m.chat.id, m.message_id, undefined, `🏓 pong (${Date.now() - t0}ms)`);
+      } catch {}
+    },
+    echo: {
+      description: "Echo back text",
+      usage: "/echo <text>",
+      handler: async (ctx, args) => {
+        if (!String(args || "").trim()) {
+          await ctx.reply("Usage: /echo <text>");
+          return;
+        }
+        await ctx.reply(String(args).slice(0, 1000));
+      },
+    },
+  },
+
+  tools: {
+    shout_text: {
+      description: "Uppercase text. The AI calls this itself when shouting fits.",
+      parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      handler: async (args) => String((args || {}).text || "").toUpperCase().slice(0, 500) || "(empty)",
+    },
+  },
+
+  onLoad(api) {
+    if (api && api.log) api.log("hello plugin loaded");
+  },
+};
