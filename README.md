@@ -228,11 +228,11 @@ Key details:
 * **Boot** - `getMe` + `launch` retried forever (2s→60s backoff); `unhandledRejection`/`telegraf error` logged, kept alive up to 10/min then exit for a clean restart; `uncaughtException` exits immediately (state may be corrupt).
 * **Skills** - `SKILLS.md` loaded once; `SHORT_PROMPT` (in `bot.js`) is the hot system prompt; `read_skill(section)` fetches detail on demand to save tokens.
 * **Logs** - every console line is timestamped + leveled: `[2026-01-31 20:53:11.853] [INFO ] …`. Each AI run logs `▶ prompt` (seq, length, session, sender: `from @user (id) in "title"`), a `✅ done in Xs | llm=N | tools=N | out=N tok | ctx≈N tok` summary, `⏹ superseded` when a newer message/command cancels it, and `❌` lines for terminal API failures. Every reply is logged with its destination - `[chat -1001 "Group"] → @user (7) ↩ reply 42 chars: "…"` - and finished answers get `↩ answer delivered | N chars | N chunk(s) | msg id`. `debugLog` adds the full per-round trace.
-* **Admin console** - a PaperMC-style console attached to `stdin` (see below): bare text chats with the AI, `sh`/`tool`/`eval` run anything in-process, plus session/model/plugin management. Works over SSH, tmux, or any terminal running `npm start`; skipped cleanly when run headless (systemd/nohup).
+* **Console** - a PaperMC-style console attached to `stdin` (see below): bare text chats with the AI, `sh`/`tool`/`eval` run anything in-process, plus session/model/plugin management. Works over SSH, tmux, or any terminal running `npm start`; skipped cleanly when run headless (systemd/nohup).
 
 ---
 
-## Admin console (CLI)
+## Console (CLI)
 
 Running `node bot.js` attaches a console to the terminal - commands never touch Telegram, but `say` and tools do. Bare text (anything that is not a command) is sent to the AI as the active session (0 = console-only session; `use <chat_id>` to target a real chat). While the AI works, a single line animates in place - spinner, elapsed seconds, live streamed reasoning - width-fitted to the terminal, then the answer prints; `tool`/`sh` get the spinner too. In non-TTY mode (pipes, journal, log files) animations are skipped and progress is not printed at all, only run summary lines and answers, so logs stay clean (one `▶ prompt` + one `✅ done` per run).
 
@@ -261,7 +261,7 @@ stop | exit | quit       save & shut down
 
 ```
 HexTelegram/
-├── bot.js                      ← Bot entry: streaming, agentic loop, all handlers + admin console
+├── bot.js                      ← Bot entry: streaming, agentic loop, all handlers + console
 ├── auth.js                     ← OAuth providers (antigravity full clone + chatgpt starter)
 ├── plugins.js                  ← Plugin loader/dispatcher (+ /plugin /pl handlers in bot.js)
 ├── plugins/

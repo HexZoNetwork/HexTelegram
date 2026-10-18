@@ -3765,7 +3765,7 @@ function createConsole(api) {
     try { return JSON.stringify(v, null, 2); } catch { return String(v); }
   };
   const HELP = [
-    "🖥  Admin console - bare text talks to the AI, everything else is a command:",
+    "🖥  Console - bare text talks to the AI, everything else is a command:",
     "  chat <text>             ask the AI (active session) - same as typing text",
     "  use <chat_id> | use off  pick which session the console chats with (default: console-only session 0)",
     "  say <chat_id> <text>     send a Telegram message as the bot (no AI)",
@@ -3966,7 +3966,7 @@ function createConsole(api) {
     if (C.rl) return C.rl;
     const rl = api.readline.createInterface({ input: process.stdin, output: process.stdout, terminal: inTty() });
     C.rl = rl;
-    if (inTty()) console.log("\n🖥  Admin console ready - `help` for commands, bare text chats with the AI.\n");
+    if (inTty()) console.log("\n🖥  Console ready - `help` for commands, bare text chats with the AI.\n");
     prompt();
     rl.on("line", async (raw) => {
       const line = String(raw || "").trim();
