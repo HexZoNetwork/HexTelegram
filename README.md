@@ -182,6 +182,15 @@ Extra: `| <instruction>` replying to a message = instruction + quoted text (e.g.
 
 Local file paths (e.g. `/tmp/shot-….png`) work for photo/document sends.
 
+### Custom Go tools (`toolscs/`)
+
+The agent can create its own tools in Go: one directory per tool under `toolscs/`, each with a `main.go` using the `github.com/HexZoNetwork/htsdk/toolscs` SDK. The bot builds them with `go build` (output `toolscs/bin/`, gitignored) when needed and registers each as `ct_<name>` for the agent.
+
+* Agent meta-tools: `ct_new` (scaffold + build + register), `ct_build` (rebuild after edits), `ct_list` (status).
+* Contract: `--schema` prints `{name, description, parameters}` JSON; args arrive as a JSON object on stdin; result on stdout; `ERROR: …` on stderr = failure.
+* Auto-loaded on boot (`loadCustomTools()`), rebuilt when `main.go` is newer than the binary.
+* Docs: `htsdk/toolscs/README.md`; example tool: `toolscs/text_stats/`.
+
 ---
 
 ## How it works
@@ -262,6 +271,10 @@ HexTelegram/
 ├── plugins.json                ← Plugin registry (gitignored)
 ├── tools-go/
 │   └── main.go                 ← Go tool runner
+├── toolscs/                    ← Custom Go tools written by the agent (ct_<name>)
+│   ├── go.mod                  ← replace ../../htsdk/toolscs
+│   ├── bin/                    ← built binaries (gitignored)
+│   └── text_stats/main.go      ← example tool
 ├── tools                       ← Built binary
 ├── config.json                 ← Your secrets (+ auth.provider)
 ├── example.config.json         ← Template config

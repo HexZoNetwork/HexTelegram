@@ -102,7 +102,8 @@ const SHORT_PROMPT =
   "(2b) 'send message with button(s) ...' -> tg_send_buttons with text (+optional parse_mode Markdown/HTML for rich formatting) and buttons=[[{'text','callback_data'|'url'}]]. One call sends text+buttons. " +
   "(2b2) AI STORAGE: you have persistent key-value notes via store_save/store_read/store_list/store_delete/store_rename. 'remember X'/'save this' -> store_save with a short id; 'what did I save' -> store_list then store_read. Owner manages via /str send|del|inspect|ls|rn." +
   "(2b3) SIDE NOTES: a user message tagged [SIDE NOTE (sent mid-task via /btw ...)] is added guidance for your CURRENT task - fold it in and keep going, do not restart or ask for confirmation." +
-  "(2e) 'make/add/fix plugin ...' -> plugin_book FIRST (topic overview, then the matching section), then plugin_new/check/test*/test_tool/test_hook, edit code with file_write/edit, dry-run everything, send the draft with tg_send_document so the owner can reply /plugin to install it. NEVER write plugins.json or the plugins/ registry yourself, NEVER claim installed. " + "(2d) MISSING TOOL? -> use tg_event with code, NEVER say unsupported. There is NO getMessage/getHistory Bot API method - NEVER try to fetch messages by id. Replied-to photos/videos/files arrive auto-loaded as [Replied-to ...] (+ vision thumbnail for video); describe the thumbnail + metadata. If context shows a media reply but NO [Replied-to ...] block, say you cannot see it and ask the user to resend/forward it. NEVER hallucinate message_ids.  Pin example: code=\"await telegram.sendMessage(chat_id, 'hi'); await telegram.pinChatMessage(chat_id, 1); return 'done'\". Raw API example: code=\"const r = await telegram.callApi('stopPoll', {chat_id, message_id: 5}); return JSON.stringify(r)\". " +
+  "(2e) 'make/add/fix plugin ...' -> plugin_book FIRST (topic overview, then the matching section), then plugin_new/check/test*/test_tool/test_hook, edit code with file_write/edit, dry-run everything, send the draft with tg_send_document so the owner can reply /plugin to install it. NEVER write plugins.json or the plugins/ registry yourself, NEVER claim installed. " +
+  "(2f) 'make a tool/toolscs/custom tool ...' or a reusable Go capability -> read_skill('tools'), then ct_new -> edit toolscs/<name>/main.go -> ct_build -> call ct_<name>. One-off jobs: shell_exec instead. " + "(2d) MISSING TOOL? -> use tg_event with code, NEVER say unsupported. There is NO getMessage/getHistory Bot API method - NEVER try to fetch messages by id. Replied-to photos/videos/files arrive auto-loaded as [Replied-to ...] (+ vision thumbnail for video); describe the thumbnail + metadata. If context shows a media reply but NO [Replied-to ...] block, say you cannot see it and ask the user to resend/forward it. NEVER hallucinate message_ids.  Pin example: code=\"await telegram.sendMessage(chat_id, 'hi'); await telegram.pinChatMessage(chat_id, 1); return 'done'\". Raw API example: code=\"const r = await telegram.callApi('stopPoll', {chat_id, message_id: 5}); return JSON.stringify(r)\". " +
   "(2c) Attached files: user message may include '[Attached ...]' with saved /tmp path + extracted content, or an image via vision. Summarize/answer DIRECTLY, no tools needed. file_read on the /tmp path only if you need more. NEVER run shell to fetch tokens/secrets. " +
   "(3) Image generation is DISABLED: if user asks to draw/make/create an image, say plainly it is turned off. NEVER call tools for it. " +
   "(4) Skill details: call read_skill(section) with a section name below, read result, act. " +
@@ -693,13 +694,16 @@ const TOOL_DEFS = [
   { type: "function", function: { name: "plugin_test_tool", description: "Dry-run one plugin agent tool (no Telegram needed). Args must be a JSON object string.", parameters: { type: "object", properties: { path: { type: "string" }, name: { type: "string", description: "tool short name (without plugin prefix)" }, args: { type: "string", description: "JSON object string, e.g. {\"text\":\"hey\"}" } }, required: ["path", "name"] } } },
   { type: "function", function: { name: "plugin_test_hook", description: "Dry-run one plugin hook (input, output, beforeTool, afterTool). Args must be a JSON array string matching what the bot passes.", parameters: { type: "object", properties: { path: { type: "string" }, kind: { type: "string", description: "input, output, beforeTool, or afterTool" }, args: { type: "string", description: "JSON array string, e.g. [\"some text\"]" } }, required: ["path", "kind"] } } },
   { type: "function", function: { name: "plugin_list", description: "List installed plugins (id, on/off, commands, agent tools, hooks). Use to see what exists before editing or adding.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "ct_new", description: "Create a NEW custom Go tool: writes toolscs/<name>/main.go (your Go code or a working starter template), builds it, and registers it as ct_<name> so you can call it. Use for reusable Go tools that should exist permanently - for one-off jobs use shell_exec instead. The Go source uses the htsdk toolscs SDK (toolscs.Main + toolscs.Tool).", parameters: { type: "object", properties: { name: { type: "string", description: "tool name [A-Za-z][A-Za-z0-9_] max 48; becomes ct_<name>" }, description: { type: "string", description: "optional: what the tool does + when to use it (goes into the registered schema)" }, code: { type: "string", description: "optional: full main.go source using github.com/HexZoNetwork/htsdk/toolscs; omit for a working template you can edit after" } }, required: ["name"] } } },
+  { type: "function", function: { name: "ct_build", description: "Build and (re)register custom Go tools from toolscs/ (bin/ output). Call after creating or editing toolscs/<name>/main.go with file_write/file_edit. No args rebuilds+reloads all; with name rebuilds one. Returns the go build errors so you can fix the code and retry.", parameters: { type: "object", properties: { name: { type: "string", description: "tool directory name (optional; default: all)" } } } } },
+  { type: "function", function: { name: "ct_list", description: "List custom Go tools in toolscs/ with build/load status (ready / stale / not built).", parameters: { type: "object", properties: {} } } },
 ];
 
 function activeTools() {
-  try {
-    const extra = plugins.getToolDefs();
-    if (extra && extra.length) return TOOL_DEFS.concat(extra);
-  } catch {}
+  let extra = [];
+  try { extra = plugins.getToolDefs() || []; } catch {}
+  for (const t of CUSTOM_TOOLS.values()) extra = extra.concat(t.def);
+  if (extra.length) return TOOL_DEFS.concat(extra);
   return TOOL_DEFS;
 }
 
@@ -745,11 +749,15 @@ const TOOL_USAGE_EXAMPLES = {
   plugin_test_tool: `plugin_test_tool({"path": "/tmp/mymod.js", "name": "shout_text", "args": "{\"text\":\"hey\"}"})`,
   plugin_test_hook: `plugin_test_hook({"path": "/tmp/mymod.js", "kind": "beforeTool", "args": "[\"shell_exec\", {\"command\":\"ls\"}]"})`,
   plugin_list: `plugin_list({})`,
+  ct_new: `ct_new({"name": "my_tool"}) or ct_new({"name": "my_tool", "description": "what it does", "code": "<full main.go using htsdk/toolscs>"})`,
+  ct_build: `ct_build({}) rebuilds all custom tools, ct_build({"name": "my_tool"}) rebuilds one`,
+  ct_list: `ct_list({})`,
 };
 function toolUsageHint(name) {
   if (TOOL_USAGE_EXAMPLES[name]) return `Usage: ${TOOL_USAGE_EXAMPLES[name]}`;
   let def = TOOL_DEFS.find((d) => d?.function?.name === name);
   if (!def) { try { def = plugins.getToolDefs().find((d) => d?.function?.name === name); } catch {} }
+  if (!def) { const ct = CUSTOM_TOOLS.get(name); if (ct) def = ct.def; }
   const props = def?.function?.parameters?.properties || {};
   const required = def?.function?.parameters?.required || def?.function?.required || Object.keys(props);
   if (!required.length) return `Usage: ${name}({}) - takes no required args`;
@@ -859,6 +867,167 @@ function installedPluginsText() {
     return `${p.enabled === false ? "OFF" : "ON"} ${p.id} v${p.version || "?"} | cmds: ${cmds} | tools: ${tls} | hooks: ${hks}${p.description ? " | " + String(p.description).slice(0, 100) : ""}`;
   }).join("\n").slice(0, 6000);
 }
+const CUSTOM_TOOLS_DIR = path.resolve(__dirname, config.customToolsDir || "toolscs");
+const CUSTOM_TOOLS = new Map();
+
+function customToolNameOk(name) {
+  return /^[A-Za-z][A-Za-z0-9_]{0,47}$/.test(String(name || ""));
+}
+function customToolDirPath(name) {
+  return path.join(CUSTOM_TOOLS_DIR, name);
+}
+function customToolBinPath(name) {
+  return path.join(CUSTOM_TOOLS_DIR, "bin", name);
+}
+function customToolNames() {
+  try {
+    return fs.readdirSync(CUSTOM_TOOLS_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && customToolNameOk(d.name) && fs.existsSync(path.join(CUSTOM_TOOLS_DIR, d.name, "main.go")))
+      .map((d) => d.name)
+      .sort();
+  } catch { return []; }
+}
+function goToolchainPath() {
+  if (config.goBin) return config.goBin;
+  for (const p of ["/usr/local/go/bin/go", "/usr/bin/go", "/usr/local/bin/go"]) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return "go";
+}
+function runBinCapture(bin, args, { input, timeout = 60000, cwd } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = execFile(bin, args, { timeout, cwd, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" }, (err, stdout, stderr) => {
+        resolve({ err, out: String(stdout || ""), errText: String(stderr || "") });
+      });
+    } catch (e) {
+      return resolve({ err: e, out: "", errText: "" });
+    }
+    if (input != null && child.stdin) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
+    }
+  });
+}
+async function customToolBuild(name) {
+  const mainFile = path.join(customToolDirPath(name), "main.go");
+  if (!fs.existsSync(mainFile)) throw new Error(`toolscs/${name}/main.go not found`);
+  fs.mkdirSync(path.join(CUSTOM_TOOLS_DIR, "bin"), { recursive: true });
+  const r = await runBinCapture(goToolchainPath(), ["build", "-o", customToolBinPath(name), "./" + name], { cwd: CUSTOM_TOOLS_DIR, timeout: 180000 });
+  if (r.err) throw new Error(String(r.errText || r.err.message || r.err).trim().slice(0, 1200) || "go build failed");
+  return customToolBinPath(name);
+}
+async function customToolLoad(name) {
+  CUSTOM_TOOLS.delete(`ct_${name}`);
+  const mainFile = path.join(customToolDirPath(name), "main.go");
+  if (!fs.existsSync(mainFile)) return { name, ok: false, error: `toolscs/${name}/main.go not found` };
+  const bin = customToolBinPath(name);
+  try {
+    const stale = !fs.existsSync(bin) || fs.statSync(mainFile).mtimeMs > fs.statSync(bin).mtimeMs;
+    if (stale) await customToolBuild(name);
+    const r = await runBinCapture(bin, ["--schema"], { timeout: 15000 });
+    if (r.err) throw new Error(String(r.errText || r.err.message || r.err).trim().slice(0, 600) || "schema failed");
+    const schema = JSON.parse(r.out);
+    if (schema.name !== name) throw new Error(`schema name '${schema.name || ""}' must equal directory name '${name}'`);
+    const def = { type: "function", function: {
+      name: `ct_${name}`,
+      description: String(schema.description || `Custom Go tool '${name}'`).slice(0, 1024),
+      parameters: schema.parameters || { type: "object", properties: {} },
+    } };
+    CUSTOM_TOOLS.set(`ct_${name}`, { name, dir: customToolDirPath(name), bin, def });
+    return { name, ok: true };
+  } catch (e) {
+    return { name, ok: false, error: String(e.message || e).slice(0, 1200) };
+  }
+}
+async function loadCustomTools() {
+  const names = customToolNames();
+  const results = [];
+  for (const n of names) results.push(await customToolLoad(n));
+  const bad = results.filter((r) => !r.ok);
+  if (results.length) {
+    console.log(`[toolscs] loaded ${results.length - bad.length}/${results.length} custom tool(s)${bad.length ? " - failed: " + bad.map((b) => b.name).join(", ") : ""}`);
+    for (const b of bad) console.warn(`[toolscs] ${b.name}: ${b.error.split("\n")[0]}`);
+  }
+  return results;
+}
+async function runCustomTool(name, args) {
+  const t = CUSTOM_TOOLS.get(name);
+  if (!t) return `ERROR: custom tool '${name}' is not loaded - run ct_build (or ct_list to see status)`;
+  const timeoutSec = Number(config.customTools?.timeoutSec || config.customToolTimeoutSec || 60);
+  const r = await runBinCapture(t.bin, [], { input: JSON.stringify(args || {}), timeout: timeoutSec * 1000 });
+  if (r.err) return `TOOL ERROR: ${name}: ${String(r.errText || r.err.message || r.err).trim().slice(0, 800) || "exit code " + r.err.code}`.slice(0, 4000);
+  return (r.out.trim() || `(${name} returned no output)`).slice(0, 8000);
+}
+function customToolsText() {
+  const names = customToolNames();
+  if (!names.length) return `custom tools: none yet in ${CUSTOM_TOOLS_DIR}. Create one with ct_new.`;
+  const lines = names.map((n) => {
+    const t = CUSTOM_TOOLS.get(`ct_${n}`);
+    if (!t) return `- ct_${n}: not loaded (build error or not built) - run ct_build`;
+    const mainFile = path.join(CUSTOM_TOOLS_DIR, n, "main.go");
+    const fresh = fs.existsSync(t.bin) && fs.statSync(mainFile).mtimeMs <= fs.statSync(t.bin).mtimeMs;
+    const desc = t.def.function.description ? " - " + t.def.function.description.slice(0, 120) : "";
+    return `- ct_${n}: ${fresh ? "ready" : "stale - run ct_build"}${desc}`;
+  });
+  return `custom tools (${CUSTOM_TOOLS_DIR}):\n${lines.join("\n")}`;
+}
+function customToolTemplate(name, description) {
+  const desc = String(description || `TODO: describe what ${name} does and when the agent should use it`).slice(0, 400);
+  return `package main
+
+import (
+	"fmt"
+
+	"github.com/HexZoNetwork/htsdk/toolscs"
+)
+
+func main() {
+	toolscs.Main(toolscs.Tool{
+		Name:        ${JSON.stringify(name)},
+		Description: ${JSON.stringify(desc)},
+		Input: []toolscs.Input{
+			{Name: "text", Type: "string", Description: "input text", Required: true},
+		},
+		Run: func(a toolscs.Args) (string, error) {
+			text := a.Str("text")
+			return fmt.Sprintf("got %d chars: %s", len(text), text), nil
+		},
+	})
+}
+`;
+}
+async function customToolNew(args) {
+  const name = String(args.name || "").trim();
+  if (!customToolNameOk(name)) return "ERROR: bad tool name (use [A-Za-z][A-Za-z0-9_], max 48)";
+  const dir = customToolDirPath(name);
+  if (fs.existsSync(dir)) return `ERROR: toolscs/${name} already exists - read its main.go with file_read, edit with file_write/file_edit, then ct_build`;
+  const code = String(args.code || "").trim() || customToolTemplate(name, args.description).trimEnd();
+  if (code.length > 100000) return "ERROR: code too long (max 100000 chars)";
+  fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(path.join(CUSTOM_TOOLS_DIR, "go.mod"))) {
+    fs.writeFileSync(path.join(CUSTOM_TOOLS_DIR, "go.mod"), "module github.com/HexZoNetwork/HexTelegram/toolscs\n\ngo 1.21\n\nrequire github.com/HexZoNetwork/htsdk/toolscs v0.0.0\n\nreplace github.com/HexZoNetwork/htsdk/toolscs => ../../htsdk/toolscs\n");
+  }
+  fs.writeFileSync(path.join(dir, "main.go"), code + "\n");
+  const res = await customToolLoad(name);
+  if (res.ok) {
+    const d = CUSTOM_TOOLS.get(`ct_${name}`)?.def?.function;
+    return `created toolscs/${name}/main.go, built and registered ct_${name}. Call it like any tool - args JSON schema: ${JSON.stringify(d?.parameters || {})}`;
+  }
+  return `wrote toolscs/${name}/main.go but the Go build failed:\n${res.error}\nFix main.go with file_read/file_edit then run ct_build.`;
+}
+async function customToolBuildAll(only) {
+  const names = only ? [String(only).trim()] : customToolNames();
+  if (!names.length) return "custom tools: nothing to build (use ct_new to create one)";
+  const lines = [];
+  for (const n of names) {
+    if (!customToolNameOk(n)) { lines.push(`- ${n}: SKIPPED bad name`); continue; }
+    const res = await customToolLoad(n);
+    lines.push(res.ok ? `- ct_${n}: built + registered` : `- ct_${n}: FAILED\n${res.error}`);
+  }
+  return lines.join("\n").slice(0, 6000);
+}
 async function runToolInner(name, args, ctx) {
   const curChat = String(ctx.chat?.id ?? ctx.from?.id ?? "");
   const chatId = (t) => String(t || curChat);
@@ -870,6 +1039,9 @@ async function runToolInner(name, args, ctx) {
       }
     } catch (e) {
       return `TOOL ERROR: plugin tool '${name}' failed: ${String(e.message || e).slice(0, 500)}`;
+    }
+    if (name.startsWith("ct_") && CUSTOM_TOOLS.has(name)) {
+      return await runCustomTool(name, args);
     }
     const def = TOOL_DEFS.find((d) => d?.function?.name === name);
     const required = def?.function?.parameters?.required || def?.function?.required || [];
@@ -1152,6 +1324,12 @@ async function runToolInner(name, args, ctx) {
         return await pluginTryTool(args.path, args.name, args.args || "{}");
       case "plugin_test_hook":
         return await pluginTryHook(args.path, args.kind, args.args || "[]");
+      case "ct_new":
+        return await customToolNew(args);
+      case "ct_build":
+        return await customToolBuildAll(args.name);
+      case "ct_list":
+        return customToolsText();
       case "store_save": {
         const id = String(args.id || "").trim();
         if (!strIdOk(id)) return "ERROR: bad id (use [A-Za-z0-9_-], max 64 chars)";
@@ -1236,6 +1414,8 @@ try {
   console.warn("[plugins] initial load failed:", e.message);
 }
 
+loadCustomTools().catch((e) => console.warn("[toolscs] load failed:", String(e.message || e).slice(0, 300)));
+
 
 const TEXT_PATH = path.join(__dirname, "text.json");
 let TEXT_BANK = ensureJson(TEXT_PATH, { tips: [], splashes: [] });
@@ -1294,7 +1474,10 @@ function actionLabel(name, args) {
     case "plugin_test_tool": return `🧪 Testing tool ${a.name || ""}`;
     case "plugin_test_hook": return `🧪 Testing hook ${a.kind || ""}`;
     case "plugin_list": return `📦 Listing plugins`;
-    default: return `⚙️ ${name}`;
+    case "ct_new": return `🧩 New custom tool ${a.name || ""}`;
+    case "ct_build": return `🔨 Building custom tool ${a.name || "all"}`;
+    case "ct_list": return `📦 Listing custom tools`;
+    default: return name.startsWith("ct_") ? `🧩 ${name}` : `⚙️ ${name}`;
   }
 }
 function themeOf(text) {
