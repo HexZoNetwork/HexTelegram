@@ -8,6 +8,12 @@
   "systemPrompt": "You are a telegram bot that can talk to users, run shell commands, and generate images. You are helpful, creative, clever, and very sacratic",
   "temperature": 0.7,
   "maxTokens": 2048,
+  "contextWindow": 131072,
+  "memory": {
+    "recentKeep": 12,
+    "compactAt": 0.8
+  },
+  "maxHistory": 0,
   "auth": {
     "provider": "apikey",
     "antigravity": {

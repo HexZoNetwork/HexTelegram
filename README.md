@@ -17,7 +17,7 @@
 
 ## Features
 
-* 💬 **Chat** - streaming answers, auto-summary memory, per-chat history
+* 💬 **Chat** - streaming answers, full per-chat history, token-aware compaction
 * 💻 **Shell + files** - `shell_exec` (any command), `file_read` / `file_write` / `file_list` from `/`
 * 🌐 **Web** - `web_search` (Bing), `web_fetch`, `web_check` (site recon), `web_screenshot` (chromium → PNG)
 * ✉️ **Telegram tools** - send message/photo/document, inline buttons, edit, delete, forward, pin, chat actions, `get_chat`
@@ -27,7 +27,7 @@
 * 🔐 **Access control** - owner + allowlist, silently ignores strangers
 * 👥 **Groups** - `/talk` `/t` triggers, `= ~ |` prefixes, @mention, reply-to-bot
 * 📡 **Multi-API failover** - pool of endpoints, auto-rotate on 5xx/network errors
-* 🧠 **Memory** - rolling window + model-generated summaries in `memory.json`
+* 🧠 **Memory** - full history until ~80% of the context window fills, then older turns are compacted into a merged summary in `memory.json`
 * 🤖 **Model picker** - `/model c` live-tests every model, paged button UI
 
 ---
@@ -71,6 +71,10 @@ Core keys:
 | `systemPrompt` | no | `""` | Extra persona text, prepended to system prompt |
 | `temperature` | no | `0.7` | Sampling temperature |
 | `maxTokens` | no | `2048` | Max completion tokens |
+| `contextWindow` | no | `131072` | Model's max input tokens - compaction fires at `memory.compactAt` of it |
+| `memory.recentKeep` | no | `12` | Messages kept raw when older turns are compacted |
+| `memory.compactAt` | no | `0.8` | Context fullness (0-1) that triggers compaction |
+| `maxHistory` | no | `0` | Optional hard cap on stored messages (`0` = unlimited) |
 | `auth.provider` | no | `apikey` | `apikey` \| `antigravity` \| `chatgpt` (switch live with `/login use`) |
 | `auth.antigravity.model` | no | `gemini-3-pro-high` | Model when provider=antigravity |
 | `auth.chatgpt.model` | no | `gpt-4o-mini` | Model when provider=chatgpt |
@@ -93,8 +97,8 @@ Everything else (streaming interval, group triggers, history window, timeouts) u
 | Command | Who | What |
 |---|---|---|
 | `/start` | anyone allowed | Intro + help |
-| `/new` | anyone allowed | Clear chat history |
-| `/forget` | anyone allowed | Clear memory + history |
+| `/new` | anyone allowed | Clear chat history (keeps the memory summary) |
+| `/forget` | anyone allowed | Clear memory summary + history |
 | `/id` | anyone allowed | Show your user ID + chat ID |
 | `/chatid` | anyone allowed | Show chat info (title, type, username) |
 | `/model` | anyone allowed | Show current chat model |
@@ -109,6 +113,12 @@ Everything else (streaming interval, group triggers, history window, timeouts) u
 | `/adduser <id\|@user>` (or reply) | Grant access |
 | `/deluser <id\|@user>` (or reply) | Revoke access |
 | `/users` | List owner + allowed users |
+| `/sessions` | List every chat session (id, type, title, msgs, tokens, summary) |
+| `/sessions <chat_id>` | Session details + full memory summary |
+| `/sessions new <chat_id>` | Clear that session's turns (keeps summary) |
+| `/sessions rm <chat_id>` | Delete that session's turns + summary |
+| `/sessions attach <chat_id>` (alias `-t`) | Attach this chat to another session - shares memory + history |
+| `/sessions detach` (alias `-d`) | Unlink this chat, back to its own session |
 | `/apis` | List API pool (★ = active) |
 | `/addapi <url> <key>` | Live-test + add API endpoint |
 | `/delapi <n>` | Remove API #n (keeps at least one) |
@@ -180,7 +190,7 @@ Local file paths (e.g. `/tmp/shot-….png`) work for photo/document sends.
 Telegram update → Telegraf middleware (stop-signal, auth by sender ID, plugin dispatcher)
   → event handler (text/photo/doc/voice/callback/…)
   → processText: builds [Context:] block (chat/sender/reply/forward IDs)
-  → handlePrompt: agentic loop (max 8 rounds)
+  → handlePrompt: agentic loop (config.maxToolRounds rounds)
       → chatStream: routes by provider -
           apikey: POST {model, messages, tools} to active API (SSE)
           antigravity: translate OpenAI → Gemini contents, call cloudcode-pa gateway (SSE)
@@ -197,10 +207,10 @@ Key details:
 
 Key details:
 
-* **Streaming UI** - one progress message, edited per state (`Thinking…` → `🔍 Checking…` → `✅ done` → final answer). Native `sendMessageDraft` path exists but the progress-message loop is the active one.
+* **Streaming UI** - one progress message, edited per state (`Thinking…` → `🔍 Checking…` → `✅ done` → final answer), re-edited while reasoning streams (~every 1.5s) so thoughts tick live. Native `sendMessageDraft` path exists but the progress-message loop is the active one.
 * **Stale-supersede** - each chat keeps only the newest request; older ones abort and never render (`⏭ Skipped…`).
 * **Failover** - API pool (`config.apis`, migrated from legacy `baseURL`/`apiKey`); 5xx/network errors rotate to next API; 502/503/504 retried with backoff (8s, 20s) then non-stream fallback.
-* **Memory** - `conversations` map (last 30 turns) + `memory.json` summaries; overflow beyond 12 recent turns is async-summarized by the chat model.
+* **Memory** - full per-chat history is kept raw; `memory.json` stores chat meta + rolling summaries. `compactHistory` merges older turns into the summary once the last prompt exceeds `memory.compactAt` (default 80%) of `contextWindow`, keeping `memory.recentKeep` messages raw; `compactMessages` does the same in-loop at 90%. Compaction failures trim and keep the previous summary - history is never lost to a failed summarize.
 * **Vision** - Telegram photos/docs/thumbnails are downloaded server-side and sent to the model as base64 data URLs (provider fetch of `api.telegram.org` links is unreliable and would leak the bot token); old image blocks are scrubbed from history so payloads stay small.
 * **AI storage** - `storage.json` key-value notes (`[A-Za-z0-9_-]`, ≤64-char ids, ≤50000-char content); AI uses `store_*` tools, owner uses `/str`; missing/corrupt runtime JSON files (`storage/memory/models_cache/text`) are auto-created on boot via `ensureJson`.
 * **Side notes** - `/btw` queues guidance into the live run for that chat; drained into the message list before every model round as `[SIDE NOTE ...]`; run liveness tracked via `activeReq` (cleaned on all exits).
@@ -208,6 +218,33 @@ Key details:
 * **IPv4** - forced (`dns.setDefaultResultOrder("ipv4first")` + pinned lookup + Go `tcp4` dialer) because the host has broken IPv6.
 * **Boot** - `getMe` + `launch` retried forever (2s→60s backoff); `unhandledRejection`/`telegraf error` logged, kept alive up to 10/min then exit for a clean restart; `uncaughtException` exits immediately (state may be corrupt).
 * **Skills** - `SKILLS.md` loaded once; `SHORT_PROMPT` (in `bot.js`) is the hot system prompt; `read_skill(section)` fetches detail on demand to save tokens.
+* **Logs** - every console line is timestamped + leveled: `[2026-01-31 20:53:11.853] [INFO ] …`. Each AI run logs `▶ prompt` (seq, length, session, sender: `from @user (id) in "title"`), a `✅ done in Xs | llm=N | tools=N | out=N tok | ctx≈N tok` summary, `⏹ superseded` when a newer message/command cancels it, and `❌` lines for terminal API failures. Every reply is logged with its destination - `[chat -1001 "Group"] → @user (7) ↩ reply 42 chars: "…"` - and finished answers get `↩ answer delivered | N chars | N chunk(s) | msg id`. `debugLog` adds the full per-round trace.
+* **Admin console** - a PaperMC-style console attached to `stdin` (see below): bare text chats with the AI, `sh`/`tool`/`eval` run anything in-process, plus session/model/plugin management. Works over SSH, tmux, or any terminal running `npm start`; skipped cleanly when run headless (systemd/nohup).
+
+---
+
+## Admin console (CLI)
+
+Running `node bot.js` attaches a console to the terminal - commands never touch Telegram, but `say` and tools do. Bare text (anything that is not a command) is sent to the AI as the active session (0 = console-only session; `use <chat_id>` to target a real chat). While the AI works, a single line animates in place - spinner, elapsed seconds, live streamed reasoning - width-fitted to the terminal, then the answer prints; `tool`/`sh` get the spinner too. In non-TTY mode (pipes, journal, log files) animations are skipped and progress is not printed at all, only run summary lines and answers, so logs stay clean (one `▶ prompt` + one `✅ done` per run).
+
+```
+chat <text>              ask the AI (same as typing text)
+use <chat_id> | use off  pick which session the console chats with
+say <chat_id> <text>     send a Telegram message as the bot (no AI)
+sessions                 list all sessions
+session <id>             session details + memory summary
+new [id] | forget [id]   clear turns (keep summary) / clear memory + turns
+rm <id>                  delete a session (turns + summary, detaches linked chats)
+model [<id>]             show provider/model or switch model
+apis                     list API endpoints (masked keys)
+plugins [reload]         list plugins / hot-reload from disk
+tool <name> <json>       run any bot tool directly, e.g. tool calc {"expression":"2+2"}
+sh <command>             run a shell command
+debug [on|off]           toggle debug logging
+eval <js>                evaluate JS inside the bot process
+status                   uptime / RAM / active runs / sessions
+stop | exit | quit       save & shut down
+```
 
 ---
 
@@ -215,7 +252,7 @@ Key details:
 
 ```
 HexTelegram/
-├── bot.js                      ← Bot entry: streaming, agentic loop, all handlers
+├── bot.js                      ← Bot entry: streaming, agentic loop, all handlers + admin console
 ├── auth.js                     ← OAuth providers (antigravity full clone + chatgpt starter)
 ├── plugins.js                  ← Plugin loader/dispatcher (+ /plugin /pl handlers in bot.js)
 ├── plugins/

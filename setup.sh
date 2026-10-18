@@ -388,7 +388,8 @@ if [ -f config.json ]; then
     C_SYS="$(json_get systemPrompt)"; C_ALLOW="$(json_get allowedUserIds)"
     C_TOUT="$(json_get apiTimeoutSec)"; [ -z "$C_TOUT" ] && C_TOUT="120"
     C_IDLE="$(json_get apiIdleSec)"; [ -z "$C_IDLE" ] && C_IDLE="45"
-    C_HIST="$(json_get maxHistory)"; [ -z "$C_HIST" ] && C_HIST="30"
+    C_HIST="$(json_get maxHistory)"; [ -z "$C_HIST" ] && C_HIST="0"
+    C_CTX="$(json_get contextWindow)"; [ -z "$C_CTX" ] && C_CTX="131072"
     C_KEEP="$(json_get memory.recentKeep)"; [ -z "$C_KEEP" ] && C_KEEP="12"
     C_ROUNDS="$(json_get maxToolRounds)"
     C_WORKDIR="$(json_get shell.workDir)"; C_SHTOUT="$(json_get shell.defaultTimeoutSec)"
@@ -421,7 +422,7 @@ if [ -f config.json ]; then
       DBG_DEF="N"; [[ "$C_DBG" == "true" ]] && DBG_DEF="y"
       ask_yn "Enable debug log?" "$DBG_DEF" N_DBG
       N_TEMP="$C_TEMP"; N_MAXT="$C_MAXT"; N_SYS="$C_SYS"; N_ALLOW="$C_ALLOW"
-      N_TOUT="$C_TOUT"; N_IDLE="$C_IDLE"; N_HIST="$C_HIST"; N_KEEP="$C_KEEP"
+      N_TOUT="$C_TOUT"; N_IDLE="$C_IDLE"; N_HIST="$C_HIST"; N_CTX="$C_CTX"; N_KEEP="$C_KEEP"
       N_ROUNDS="$C_ROUNDS"; N_WORKDIR="$C_WORKDIR"; N_SHTOUT="$C_SHTOUT"
       N_GCMDS="$C_GCMDS"; N_GPFX="$C_GPFX"
       if is_yn_yes "$ADV"; then
@@ -432,8 +433,9 @@ if [ -f config.json ]; then
         ask "Extra allowed user IDs (comma-separated, empty=none)" "$C_ALLOW" N_ALLOW
         ask "API timeout seconds" "$C_TOUT" N_TOUT
         ask "API idle-stream seconds" "$C_IDLE" N_IDLE
-        ask "Max chat history turns" "$C_HIST" N_HIST
-        ask "Memory recent-keep turns" "$C_KEEP" N_KEEP
+        ask "Max chat history messages (0=unlimited, token compaction handles it)" "$C_HIST" N_HIST
+        ask "Context window tokens (model max input; compaction at 80%)" "$C_CTX" N_CTX
+        ask "Memory recent-keep messages (kept raw on compaction)" "$C_KEEP" N_KEEP
         ask "Max tool rounds (empty=unlimited)" "$C_ROUNDS" N_ROUNDS
         ask "Shell workDir" "${C_WORKDIR:-/}" N_WORKDIR
         ask "Shell default timeout seconds" "${C_SHTOUT:-30}" N_SHTOUT
@@ -443,7 +445,7 @@ if [ -f config.json ]; then
       N_TOKEN="${N_TOKEN:-}"; N_OWNER="${N_OWNER:-}"; N_BASE="${N_BASE:-}"; N_KEY="${N_KEY:-}"; N_MODEL="${N_MODEL:-$C_MODEL}"
       PATCH_JSON="$(N_TOKEN="$N_TOKEN" N_OWNER="$N_OWNER" N_BASE="$N_BASE" N_KEY="$N_KEY" N_MODEL="$N_MODEL" \
         N_DBG="$N_DBG" N_TEMP="$N_TEMP" N_MAXT="$N_MAXT" N_SYS="$N_SYS" N_ALLOW="$N_ALLOW" \
-        N_TOUT="$N_TOUT" N_IDLE="$N_IDLE" N_HIST="$N_HIST" N_KEEP="$N_KEEP" N_ROUNDS="$N_ROUNDS" \
+        N_TOUT="$N_TOUT" N_IDLE="$N_IDLE" N_HIST="$N_HIST" N_CTX="$N_CTX" N_KEEP="$N_KEEP" N_ROUNDS="$N_ROUNDS" \
         N_WORKDIR="$N_WORKDIR" N_SHTOUT="$N_SHTOUT" N_GCMDS="$N_GCMDS" N_GPFX="$N_GPFX" ADV="$ADV" \
         node -e '
         const e=n=>process.env[n]??"";
@@ -466,8 +468,10 @@ if [ -f config.json ]; then
           const allow=csv(e("N_ALLOW")).map(Number).filter(n=>Number.isFinite(n)&&n>0);
           p.allowedUserIds=allow;
           p.apiTimeoutSec=Math.trunc(num(e("N_TOUT"),120)); p.apiIdleSec=Math.trunc(num(e("N_IDLE"),45));
-          p.maxHistory=Math.trunc(num(e("N_HIST"),30));
-          p.memory={...(()=>{try{return require("./config.json").memory||{}}catch{return{}}})(), recentKeep:Math.trunc(num(e("N_KEEP"),12))};
+          p.maxHistory=Math.trunc(num(e("N_HIST"),0));
+          p.contextWindow=Math.trunc(num(e("N_CTX"),131072));
+          const prevMem=(()=>{try{return require("./config.json").memory||{}}catch{return{}}})();
+          p.memory={...prevMem, recentKeep:Math.trunc(num(e("N_KEEP"),12)), compactAt:Number.isFinite(Number(prevMem.compactAt))?Number(prevMem.compactAt):0.8};
           if(String(e("N_ROUNDS")).trim()) p.maxToolRounds=Math.trunc(num(e("N_ROUNDS"),8));
           const sh=(()=>{try{return require("./config.json").shell||{}}catch{return{}}})();
           p.shell={...sh};

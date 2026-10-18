@@ -1,30 +1,3 @@
-/**
- * HexTelegram Plugins - dynamic command plugins (CommonJS .js + .zip bundles + URL install)
- * Non-commercial (HXZ License).
- *
- * Layout:
- *   plugins/               <- installed plugins (gitignored except .gitkeep/example)
- *     hello.js             <- single-file plugin (module.exports = {...})
- *     mybundle/            <- folder plugin from .zip (index.js | main.js | plugin.js)
- *   plugins.json           <- registry { <id>: { id, file, name, version, desc,
- *                            enabled, commands: [], addedAt, source } }
- *
- * Plugin module shape (both styles):
- *   module.exports = {
- *     name: "hello",
- *     version: "1.0.0",
- *     description: "Says hello",
- *     commands: {
- *       "hello": async (ctx, args, api) => { await ctx.reply("hi"); },
- *     },
- *     onLoad(api) {}, onUnload(api) {}
- *   }
- *
- * Dispatcher: a single Telegraf middleware (installPluginMiddleware) runs after
- * auth, before built-ins. If text matches /<cmd> of an ENABLED plugin, it runs
- * and stops propagation. This allows load/unload without Telegraf unregister.
- */
-
 "use strict";
 
 const fs = require("fs");

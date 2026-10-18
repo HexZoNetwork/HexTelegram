@@ -6,6 +6,16 @@ const path = require("path");
 const dns = require("dns");
 const https = require("https");
 
+function logStamp() {
+  const d = new Date();
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
+for (const [method, tag] of [["log", "INFO "], ["info", "INFO "], ["warn", "WARN "], ["error", "ERROR"], ["debug", "DEBUG"]]) {
+  const orig = console[method].bind(console);
+  console[method] = (...args) => orig(`[${logStamp()}] [${tag}]`, ...args);
+}
+
 
 try { dns.setDefaultResultOrder("ipv4first"); } catch {}
 const ipv4Lookup = (hostname, opts, cb) => {
@@ -14,6 +24,7 @@ const ipv4Lookup = (hostname, opts, cb) => {
 };
 const ipv4Agent = new https.Agent({ lookup: ipv4Lookup, keepAlive: true });
 const { execFile } = require("child_process");
+const readline = require("readline");
 const { Telegraf } = require("telegraf");
 const auth = require("./auth");
 const plugins = require("./plugins");
@@ -126,7 +137,7 @@ function readSkill(name) {
 function buildSystem(memorySummary) {
   let s = SHORT_PROMPT;
   if (config.systemPrompt && config.systemPrompt.trim()) s = `${config.systemPrompt.trim()}\n${s}`;
-  if (memorySummary) s += `\nConversation memory (auto-summary, older turns compressed): ${memorySummary}`.slice(0, 1500);
+  if (memorySummary) s += `\nConversation memory (auto-summary of older, compacted turns): ${String(memorySummary).slice(0, 6200)}`;
   try {
     const pt = plugins.getToolDefs();
     if (pt.length) {
@@ -232,9 +243,28 @@ function isAllowed(id) {
   if (config.ownerUserId) list.push(config.ownerUserId);
   return list.includes(id);
 }
+function replyTag(ctx) {
+  const f = ctx.from || {};
+  const c = ctx.chat || {};
+  const name = f.username ? "@" + f.username : ([f.first_name, f.last_name].filter(Boolean).join(" ") || `user ${f.id ?? "?"}`);
+  const title = c.title ? ` "${String(c.title).slice(0, 40)}"` : c.username ? ` @${c.username}` : c.type && c.type !== "private" ? ` [${c.type}]` : "";
+  return `[chat ${c.id ?? "?"}${title}] → ${name} (${f.id ?? "?"})`;
+}
+function logReply(ctx, text) {
+  try {
+    const s = typeof text === "string" ? text : "";
+    const head = s.split("\n")[0];
+    console.log(`${replyTag(ctx)} ↩ reply ${s.length} chars: "${head.slice(0, 60)}${head.length > 60 ? "…" : ""}"`);
+  } catch {}
+}
 bot.use((ctx, next) => {
   const uid = ctx.from?.id;
   if (!uid || !isAllowed(uid)) return;
+  return next();
+});
+bot.use((ctx, next) => {
+  const orig = ctx.reply.bind(ctx);
+  ctx.reply = (text, extra) => { logReply(ctx, text); return orig(text, extra); };
   return next();
 });
 bot.use(plugins.middleware());
@@ -266,6 +296,7 @@ async function chatStream(messages, tools, onContent, signal, useStream = true, 
     stream: useStream,
   };
   if (tools && tools.length) body.tools = tools;
+  if (useStream && config.streamUsage !== false) body.stream_options = { include_usage: true };
 
 
   const apiSec = config.apiTimeoutSec ?? 120;
@@ -298,6 +329,24 @@ async function chatStream(messages, tools, onContent, signal, useStream = true, 
         try { await r.text().catch(() => {}); } catch {}
         lastErr = new Error(`API ${r.status} on api#${idx + 1}`);
         continue;
+      }
+      if (r.status === 400 && body.stream_options) {
+        const t = await r.clone().text().catch(() => "");
+        if (/stream_options/i.test(t)) {
+          delete body.stream_options;
+          if (config.debugLog) console.log(`[api#${idx + 1}] provider rejected stream_options - retrying without token usage`);
+          res = await fetch(apiUrl(idx, "/chat/completions"), {
+            method: "POST",
+            headers: apiHeaders(idx),
+            body: JSON.stringify(body),
+            signal: tctl.signal,
+          });
+          usedIdx = idx; lastErr = null;
+          break;
+        }
+        lastErr = new Error(`API 400: ${t.slice(0, 200)}`);
+        res = r;
+        break;
       }
       res = r; usedIdx = idx; lastErr = null;
       break;
@@ -345,7 +394,7 @@ async function chatStream(messages, tools, onContent, signal, useStream = true, 
     }));
     if (msg.reasoning_content && onThought) { try { onThought(String(msg.reasoning_content)); } catch {} }
     if (config.debugLog) console.log(`[api] non-stream done in ${Date.now() - t0}ms len=${(msg.content || "").length} tools=${tc.length}`);
-    return { content: msg.content || "", toolCalls: tc, finishReason: j.choices?.[0]?.finish_reason || null, aborted: false };
+    return { content: msg.content || "", toolCalls: tc, finishReason: j.choices?.[0]?.finish_reason || null, aborted: false, usage: j.usage || null };
   }
 
   const reader = res.body.getReader();
@@ -355,6 +404,7 @@ async function chatStream(messages, tools, onContent, signal, useStream = true, 
   let reasoning = "";
   const toolByIndex = new Map();
   let finishReason = null;
+  let usage = null;
 
   const feed = (chunk) => {
     buf += chunk;
@@ -367,6 +417,7 @@ async function chatStream(messages, tools, onContent, signal, useStream = true, 
       if (!data || data === "[DONE]") continue;
       let ev;
       try { ev = JSON.parse(data); } catch { continue; }
+      if (ev.usage) usage = ev.usage;
       const choice = ev.choices?.[0];
       if (!choice) continue;
       const d = choice.delta || {};
@@ -421,7 +472,7 @@ async function chatStream(messages, tools, onContent, signal, useStream = true, 
   if (config.debugLog) console.log(`[api] stream done in ${Date.now() - t0}ms len=${content.length} tools=${toolByIndex.size} finish=${finishReason}`);
 
   if (!gotAny && !content && !toolByIndex.size) throw new Error("API returned empty stream (no SSE data) - retrying");
-  return { content, toolCalls: [...toolByIndex.values()], finishReason, aborted };
+  return { content, toolCalls: [...toolByIndex.values()], finishReason, aborted, usage };
 }
 
 async function chatStreamChatGPT(messages, tools, onContent, signal, useStream = true, onThought, opts = {}) {
@@ -447,6 +498,7 @@ async function chatStreamChatGPT(messages, tools, onContent, signal, useStream =
     stream: useStream,
   };
   if (tools && tools.length) body.tools = tools;
+  if (useStream && config.streamUsage !== false) body.stream_options = { include_usage: true };
   if (config.debugLog) console.log(`[api] chatgpt model=${model} msgs=${messages.length} tools=${tools?.length || 0} via ${baseURL}`);
   const apiSec = config.apiTimeoutSec ?? 120;
   const tctl = new AbortController();
@@ -504,7 +556,7 @@ async function chatStreamChatGPT(messages, tools, onContent, signal, useStream =
     }));
     if (msg.reasoning_content && onThought) { try { onThought(String(msg.reasoning_content)); } catch {} }
     if (config.debugLog) console.log(`[api] chatgpt non-stream done in ${Date.now() - t0}ms len=${(msg.content || "").length} tools=${tc.length}`);
-    return { content: msg.content || "", toolCalls: tc, finishReason: (j.choices && j.choices[0] && j.choices[0].finish_reason) || null, aborted: false };
+    return { content: msg.content || "", toolCalls: tc, finishReason: (j.choices && j.choices[0] && j.choices[0].finish_reason) || null, aborted: false, usage: j.usage || null };
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -513,6 +565,7 @@ async function chatStreamChatGPT(messages, tools, onContent, signal, useStream =
   let reasoning = "";
   const toolByIndex = new Map();
   let finishReason = null;
+  let usage = null;
   const feed = (chunk) => {
     buf += chunk;
     const parts = buf.split("\n");
@@ -524,6 +577,7 @@ async function chatStreamChatGPT(messages, tools, onContent, signal, useStream =
       if (!data || data === "[DONE]") continue;
       let ev;
       try { ev = JSON.parse(data); } catch { continue; }
+      if (ev.usage) usage = ev.usage;
       const choice = ev.choices?.[0];
       if (!choice) continue;
       const d = choice.delta || {};
@@ -555,11 +609,11 @@ async function chatStreamChatGPT(messages, tools, onContent, signal, useStream =
     }
     feed(dec.decode());
   } catch (e) {
-    if (signal?.aborted || tctl.signal.aborted) return { content, toolCalls: [...toolByIndex.values()], finishReason, aborted: true };
+    if (signal?.aborted || tctl.signal.aborted) return { content, toolCalls: [...toolByIndex.values()], finishReason, aborted: true, usage };
     throw e;
   }
   if (config.debugLog) console.log(`[api] chatgpt stream done in ${Date.now() - t0}ms len=${content.length} tools=${toolByIndex.size}`);
-  return { content, toolCalls: [...toolByIndex.values()], finishReason, aborted: false };
+  return { content, toolCalls: [...toolByIndex.values()], finishReason, aborted: false, usage };
 }
 
 
@@ -1287,7 +1341,7 @@ function thoughtSnippet(raw) {
 const MEMORY_PATH = path.join(__dirname, "memory.json");
 let memoryStore = ensureJson(MEMORY_PATH, {});
 function saveMemory() {
-  try { fs.writeFileSync(MEMORY_PATH, JSON.stringify(memoryStore).slice(0, 200000)); }
+  try { fs.writeFileSync(MEMORY_PATH, JSON.stringify(memoryStore)); }
   catch (e) { console.error("saveMemory failed:", e.message); }
 }
 let memoryDirty = false;
@@ -1315,8 +1369,10 @@ function saveHistory() {
   historyDirty = false;
   try {
     const obj = {};
+    const max = config.maxHistory ?? 0;
     for (const [k, v] of conversations) {
-      obj[k] = v.slice(-(config.maxHistory ?? 30)).map((m) => {
+      const arr = max > 0 ? v.slice(-max) : v;
+      obj[k] = arr.map((m) => {
         let c = m.content;
         if (Array.isArray(c)) {
           c = c.map((p) => (p && p.type === "image_url")
@@ -1328,7 +1384,7 @@ function saveHistory() {
         return { role: m.role, content: c, ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}), ...(m.tool_call_id ? { tool_call_id: m.tool_call_id, name: m.name } : {}) };
       });
     }
-    fs.writeFileSync(HISTORY_PATH, JSON.stringify(obj).slice(0, 500000));
+    fs.writeFileSync(HISTORY_PATH, JSON.stringify(obj));
   } catch (e) { console.error("saveHistory failed:", e.message); }
 }
 function saveHistorySoon() {
@@ -1336,14 +1392,154 @@ function saveHistorySoon() {
   historyDirty = true;
   setTimeout(() => { if (historyDirty) saveHistory(); }, 2000).unref?.();
 }
-async function summarizeTexts(texts, lang = "same language") {
+function sampleText(text, max = 24000) {
+  const s = String(text || "");
+  if (s.length <= max) return s;
+  const half = Math.floor(max / 2);
+  return `${s.slice(0, half)}\n\n[...${s.length - max} chars omitted...]\n\n${s.slice(-half)}`;
+}
+async function summarizeTexts(texts, lang = "same language", prevSummary = "") {
   try {
+    const head = prevSummary ? `Previous summary of even earlier conversation:\n${String(prevSummary).slice(0, 5000)}\n\n` : "";
     const r = await chatStream(
-      [{ role: "user", content: `Summarize this chat history in ONE short paragraph (${lang}), keep facts/names/ids/URLs/decisions, drop chit-chat. Max 120 words:\n\n${texts.slice(-12000)}` }],
+      [{ role: "user", content: `Update the running memory of this Telegram chat. Merge ${prevSummary ? "the previous summary and " : ""}the transcript below into ONE cohesive summary (${lang}). Keep facts, names, user ids, URLs, file paths, decisions and open tasks; drop chit-chat and filler. Plain text, max 400 words.\n\n${head}Transcript:\n${sampleText(texts)}` }],
       null, null, undefined, false
     );
-    return (r.content || "").trim().slice(0, 1000);
+    return (r.content || "").trim().slice(0, 6000);
   } catch { return ""; }
+}
+function estTokensOf(msgs) {
+  let chars = 0;
+  for (const m of msgs || []) {
+    const c = m?.content;
+    if (typeof c === "string") chars += c.length;
+    else if (Array.isArray(c)) {
+      for (const p of c) {
+        if (p && p.type === "text") chars += String(p.text || "").length;
+        else if (p && p.type === "image_url") chars += 1200;
+      }
+    }
+    if (m && m.tool_calls) { try { chars += JSON.stringify(m.tool_calls).length; } catch {} }
+  }
+  return Math.ceil(chars / 4) + (msgs || []).length * 4;
+}
+function scaledEstimate(chatId, msgs) {
+  const base = estTokensOf(msgs);
+  const e = memoryStore[chatId] || {};
+  if (e.lastPromptTokens > 0 && e.lastEstimate > 0) {
+    const ratio = Math.min(3, Math.max(0.5, e.lastPromptTokens / e.lastEstimate));
+    return Math.ceil(base * ratio);
+  }
+  return base;
+}
+function activeSessionId(chatId) {
+  let id = chatId;
+  const seen = new Set([id]);
+  for (let i = 0; i < 4; i++) {
+    const t = memoryStore[id]?.attach;
+    if (!t || seen.has(t)) break;
+    seen.add(t);
+    id = t;
+  }
+  return id;
+}
+function noteChatMeta(chatId, chat) {
+  if (!chat || chatId === undefined) return;
+  const e = memoryStore[chatId] || (memoryStore[chatId] = { firstSeen: Date.now() });
+  const type = chat.type || "private";
+  let title = chat.title || "";
+  if (!title && type === "private") {
+    title = [chat.first_name, chat.last_name].filter(Boolean).join(" ") || (chat.username ? "@" + chat.username : "");
+  }
+  if (e.chatType !== type || e.chatTitle !== title) {
+    e.chatType = type;
+    e.chatTitle = title;
+    saveMemorySoon();
+  }
+}
+function noteUsage(chatId, r, messages) {
+  const p = r && r.usage && r.usage.prompt_tokens;
+  if (!p || !chatId) return;
+  const e = memoryStore[chatId] || (memoryStore[chatId] = { firstSeen: Date.now() });
+  e.lastPromptTokens = p;
+  e.lastEstimate = estTokensOf(messages);
+  saveMemorySoon();
+}
+function chatContextTokens(chatId) {
+  const msgs = [{ role: "system", content: buildSystem(memoryStore[chatId]?.summary || "") }, ...(conversations.get(chatId) || [])];
+  return scaledEstimate(chatId, msgs);
+}
+const compactRuns = new Map();
+async function compactHistory(chatId, force = false) {
+  if (compactRuns.has(chatId)) return compactRuns.get(chatId);
+  const run = (async () => {
+    const win = config.contextWindow ?? 131072;
+    const compactAt = config.memory?.compactAt ?? 0.8;
+    const h = conversations.get(chatId);
+    if (!h || h.length < 3) return 0;
+    const before = chatContextTokens(chatId);
+    if (!force && before < win * compactAt) return 0;
+    const keep = Math.max(2, config.memory?.recentKeep ?? 12);
+    const keepEff = Math.min(keep, Math.max(2, h.length - 1));
+    const overflow = h.slice(0, h.length - keepEff);
+    if (!overflow.length) return 0;
+    const txt = overflow.map((m) => {
+      const cc = Array.isArray(m.content)
+        ? m.content.filter((p) => p && p.type === "text").map((p) => p.text).join("\n")
+        : m.content;
+      return `${m.role}: ${typeof cc === "string" ? cc : "[media]"}`;
+    }).join("\n");
+    const prevSummary = memoryStore[chatId]?.summary || "";
+    let s = await summarizeTexts(txt, "same language", prevSummary);
+    if (!s) s = await summarizeTexts(txt, "same language", prevSummary);
+    if (conversations.get(chatId) !== h) return 0;
+    h.splice(0, overflow.length);
+    const prev = memoryStore[chatId] || {};
+    memoryStore[chatId] = {
+      ...prev,
+      summary: (s || prev.summary || "").slice(0, 6000),
+      compacted: Date.now(),
+      updated: Date.now(),
+      lastPromptTokens: 0,
+      lastEstimate: 0,
+    };
+    saveHistory();
+    saveMemory();
+    if (config.debugLog) console.log(`[memory ${chatId}] compacted ${overflow.length} msgs (was ~${before} tok, now ~${chatContextTokens(chatId)} tok, ${s ? "summarized" : "SUMMARY FAILED - kept previous"})`);
+    return overflow.length;
+  })();
+  compactRuns.set(chatId, run);
+  try { return await run; } finally { compactRuns.delete(chatId); }
+}
+async function compactMessages(messages, chatId, force = false) {
+  const win = config.contextWindow ?? 131072;
+  if (!force && scaledEstimate(chatId, messages) < win * 0.9) return 0;
+  const keep = Math.max(8, config.memory?.recentKeep ?? 12);
+  if (messages.length <= keep + 2) return 0;
+  let cut = messages.length - keep;
+  while (cut < messages.length && messages[cut].role !== "user") cut++;
+  if (cut <= 1 || cut >= messages.length) return 0;
+  const sys = messages[0];
+  const old = messages.slice(1, cut);
+  const kept = messages.slice(cut);
+  const txt = old.map((m) => {
+    const cc = Array.isArray(m.content)
+      ? m.content.filter((p) => p && p.type === "text").map((p) => p.text).join("\n")
+      : m.content;
+    return `${m.role}: ${typeof cc === "string" ? cc : "[tool/media]"}`;
+  }).join("\n");
+  const s = await summarizeTexts(txt, "same language", "");
+  const note = s
+    ? `\n\n[Context compressed - earlier turns of this request summarized: ${s}]`
+    : `\n\n[Context compressed - ${old.length} earlier messages dropped to stay within the context window]`;
+  let base = String(sys.content || "");
+  const prevNote = base.indexOf("\n\n[Context compressed");
+  if (prevNote >= 0) base = base.slice(0, prevNote);
+  messages.length = 0;
+  messages.push({ role: "system", content: base + note.slice(0, 6200) });
+  messages.push(...kept);
+  if (config.debugLog) console.log(`[chat ${chatId}] in-request compaction: dropped ${old.length} msgs, kept ${kept.length}${s ? " (summarized)" : ""}`);
+  return old.length;
 }
 function scrubVision(content) {
   if (!Array.isArray(content)) return content;
@@ -1361,8 +1557,8 @@ function pushHistory(chatId, role, content) {
     if (Array.isArray(m.content)) m.content = scrubVision(m.content);
   }
   h.push({ role, content: scrubVision(content) });
-  const max = config.maxHistory ?? 30;
-  while (h.length > max) h.shift();
+  const max = config.maxHistory ?? 0;
+  if (max > 0) while (h.length > max) h.shift();
   saveHistorySoon();
 
   const plain = typeof content === "string" ? content
@@ -1373,23 +1569,6 @@ function pushHistory(chatId, role, content) {
   const snippet = plain.replace(/\s+/g, " ").trim().slice(0, 120);
   if (snippet) entry.lastMsg = snippet;
   saveMemorySoon();
-
-  const keep = config.memory?.recentKeep ?? 12;
-  if (h.length > keep + 4) {
-    const overflow = h.splice(0, h.length - keep);
-    const txt = overflow.map((m) => {
-      const cc = Array.isArray(m.content)
-        ? m.content.filter((p) => p && p.type === "text").map((p) => p.text).join("\n")
-        : m.content;
-      return `${m.role}: ${typeof cc === "string" ? cc : "[media/tool]"}`.slice(0, 1000);
-    }).join("\n");
-    summarizeTexts(txt).then((s) => {
-      if (!s) return;
-      const prev = memoryStore[chatId] || {};
-      memoryStore[chatId] = { ...prev, summary: `${prev.summary || ""}\n${s}`.trim().slice(-1500), updated: Date.now() };
-      saveMemory();
-    }).catch(() => {});
-  }
 }
 
 
@@ -1460,17 +1639,20 @@ async function finalizeDraft(ctx, draftId, fullText) {
       else throw new Error("plain");
     } catch { await ctx.reply(chunk.slice(0, 4000), replyThreadOpts(ctx)); }
   }
+  try { console.log(`${replyTag(ctx)} ↩ answer delivered | ${text.length} chars | draft ${draftId}`); } catch {}
 }
 async function finalizeStream(ctx, msg, fullText) {
   const text = String(fullText || "").trim();
   if (!msg) {
     if (!text) return;
-    for (const chunk of splitTG(text)) {
+    const parts = splitTG(text);
+    for (const chunk of parts) {
       try {
         if (STREAM.richFinal) await ctx.reply(chunk.slice(0, 4000), replyThreadOpts(ctx, { parse_mode: "Markdown" }));
         else throw new Error("plain");
       } catch { await ctx.reply(chunk.slice(0, 4000), replyThreadOpts(ctx)); }
     }
+    try { console.log(`${replyTag(ctx)} ↩ answer delivered | ${text.length} chars | ${parts.length} chunk(s) | no-progress-msg`); } catch {}
     return;
   }
   if (!text) {
@@ -1491,6 +1673,7 @@ async function finalizeStream(ctx, msg, fullText) {
       else throw new Error("plain");
     } catch { await ctx.reply(chunk.slice(0, 4000), replyThreadOpts(ctx)); }
   }
+  try { console.log(`${replyTag(ctx)} ↩ answer delivered | ${text.length} chars | ${chunks.length} chunk(s) | msg ${msg.message_id ?? "?"}`); } catch {}
 }
 
 
@@ -1525,18 +1708,24 @@ async function handlePrompt(chatId, userContent, ctx) {
     try { await ctx.reply(`⛔ ${String(e.message || e).slice(0, 300)}`); } catch {}
     return;
   }
-  pushHistory(chatId, "user", userContent);
-  const memSummary = memoryStore[chatId]?.summary || "";
-  const messages = [{ role: "system", content: buildSystem(memSummary) }, ...conversations.get(chatId)];
+  const sessId = activeSessionId(chatId);
+  if (sessId !== chatId && config.debugLog) console.log(`[chat ${chatId}] attached -> session ${sessId}`);
+  noteChatMeta(chatId, ctx.chat);
+  pushHistory(sessId, "user", userContent);
+  await compactHistory(sessId);
+  const memSummary = memoryStore[sessId]?.summary || "";
+  const messages = [{ role: "system", content: buildSystem(memSummary) }, ...(conversations.get(sessId) || [])];
   const hardCap = config.maxToolRounds;
   const failStreak = { key: null, count: 0 };
   let blockedSig = null;
   let truncStreak = 0;
+  let llmCalls = 0, outTokens = 0, toolCount = 0;
   const mySeq = ++reqCounter;
   activeReq.set(chatId, mySeq);
   const isStale = () => activeReq.get(chatId) !== mySeq;
   const dbg = (...a) => { if (config.debugLog) console.log(`[chat ${chatId} seq ${mySeq}]`, ...a); };
   dbg("start:", String(typeof userContent === "string" ? userContent : "[media]").slice(0, 160));
+  console.log(`[chat ${chatId}] ▶ prompt seq=${mySeq} len=${String(userContent || "").length}${sessId !== chatId ? ` -> session ${sessId}` : ""} | from ${ctx.from?.username ? "@" + ctx.from.username : ctx.from?.first_name || "?"} (${ctx.from?.id ?? "?"})${ctx.chat?.title ? ` in "${String(ctx.chat.title).slice(0, 40)}"` : ""}`);
 
   let prog = null;
   const t0 = Date.now();
@@ -1544,7 +1733,14 @@ async function handlePrompt(chatId, userContent, ctx) {
   const st = { action: "💭 Thinking", status: "Reading request", custom: "", tip: pickTip(), tool: "" };
   st.custom = customStatus(theme, 0, "");
   let liveThought = "";
-  const noteThought = (t) => { liveThought = String(t || ""); };
+  let lastStreamTick = 0;
+  const emitProgress = (p) => { if (ctx.__onProgress) { try { ctx.__onProgress(p); } catch {} } };
+  const noteThought = (t) => {
+    liveThought = String(t || "");
+    emitProgress({ thought: liveThought });
+    const now = Date.now();
+    if (now - lastStreamTick >= 1500) { lastStreamTick = now; showProg().catch(() => {}); }
+  };
   const show = async (t) => {
     if (isStale()) { dbg("skip show (stale):", String(t).slice(0, 80)); return false; }
     try {
@@ -1557,7 +1753,9 @@ async function handlePrompt(chatId, userContent, ctx) {
     const el = Math.floor((Date.now() - t0) / 1000);
     const snip = thoughtSnippet(liveThought);
     st.custom = snip ? `- ${snip}` : customStatus(theme, el, st.tool || "");
-    return show(renderProg(st));
+    const txt = renderProg(st);
+    emitProgress({ text: txt });
+    return show(txt);
   };
   const liveTicker = setInterval(() => {
     if (isStale()) return;
@@ -1574,6 +1772,7 @@ async function handlePrompt(chatId, userContent, ctx) {
     if (isStale()) { dbg(`abort at round ${round} (superseded)`); break; }
     const drained = drainSideNotes(chatId, messages);
     if (drained) { dbg(`injected ${drained} btw note(s) before round ${round}`); }
+    await compactMessages(messages, sessId);
     let r;
     try {
       r = await chatStream(messages, activeTools(), null, undefined, true, noteThought);
@@ -1582,48 +1781,73 @@ async function handlePrompt(chatId, userContent, ctx) {
       const msg1 = String(e.message || e);
       dbg("round error:", msg1.slice(0, 200));
 
-      const retriable = /API 50[234]|Bad gateway|terminated|stalled|empty stream|fetch failed|unreachable|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ECONNRESET|socket hang up|network|timeout|TLS|SSL|502|503|504/i.test(msg1);
-      if (!retriable) {
+      const ctxLimit = /context length|context_length|maximum context|too many tokens|reduce the length|prompt is too long|tokens in the messages|input is too long/i.test(msg1);
+      if (ctxLimit) {
+        dbg("API says context too long - force-compacting and retrying");
+        await compactHistory(sessId, true).catch(() => {});
+        await compactMessages(messages, sessId, true).catch(() => {});
         try {
-          await sleep(2000);
-          if (isStale()) break;
           r = await chatStream(messages, activeTools(), null, undefined, false, noteThought);
+          if (isStale()) break;
+          noteUsage(sessId, r, messages);
+          dbg("post-compaction retry succeeded");
         } catch (e2) {
-          dbg("non-retriable, giving up:", String(e2.message || e2).slice(0, 160));
+          dbg("post-compaction retry failed:", String(e2.message || e2).slice(0, 160));
+          console.error(`[chat ${chatId}] ❌ failed after compaction: ${String(e2.message || e2).slice(0, 200)}`);
           clearInterval(liveTicker);
           if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
-          await show(`❌ Request failed: ${String(e2.message || e2).slice(0, 250)}`);
+          await show(`❌ Request failed even after compacting context: ${String(e2.message || e2).slice(0, 220)}\nSend /new to start fresh, or shorten the request.`);
           return;
         }
       } else {
-        const maxWaitMs = (config.apiRetryMaxSec ?? 600) * 1000;
-        const waits = [2000, 5000, 10000, 20000, 30000, 60000];
-        const tRetry0 = Date.now();
-        let attempt = 0, lastErr = e, ok = false;
-        while (Date.now() - tRetry0 < maxWaitMs) {
-          const wait = waits[Math.min(attempt, waits.length - 1)];
-          attempt++;
-          await show(`⚠️ API unreachable (${msg1.slice(0, 120)})\nRetry ${attempt} in ${wait / 1000}s… (keeping your request, no need to resend)`);
-          await sleep(wait);
-          if (isStale()) break;
+        const retriable = /API 50[234]|Bad gateway|terminated|stalled|empty stream|fetch failed|unreachable|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ECONNRESET|socket hang up|network|timeout|TLS|SSL|502|503|504/i.test(msg1);
+        if (!retriable) {
           try {
-            r = await chatStream(messages, activeTools(), null, undefined, attempt < 2, noteThought);
-            lastErr = null; ok = true;
-            dbg(`retry ${attempt} succeeded`);
-            break;
-          } catch (e2) { lastErr = e2; dbg(`retry ${attempt} failed:`, String(e2.message || e2).slice(0, 160)); }
-        }
-        if (!ok || isStale()) {
-          if (isStale()) break;
-          dbg("retry budget exhausted:", String(lastErr?.message || lastErr).slice(0, 200));
-          clearInterval(liveTicker);
-          if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
-          await show(`❌ API still unreachable after ${Math.round((Date.now() - tRetry0) / 1000)}s: ${String(lastErr?.message || lastErr).slice(0, 200)}\nYour message is kept - send anything to retry, or try again in a few minutes.`);
-          return;
+            await sleep(2000);
+            if (isStale()) break;
+            r = await chatStream(messages, activeTools(), null, undefined, false, noteThought);
+          } catch (e2) {
+            dbg("non-retriable, giving up:", String(e2.message || e2).slice(0, 160));
+            console.error(`[chat ${chatId}] ❌ request failed: ${String(e2.message || e2).slice(0, 200)}`);
+            clearInterval(liveTicker);
+            if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
+            await show(`❌ Request failed: ${String(e2.message || e2).slice(0, 250)}`);
+            return;
+          }
+        } else {
+          const maxWaitMs = (config.apiRetryMaxSec ?? 600) * 1000;
+          const waits = [2000, 5000, 10000, 20000, 30000, 60000];
+          const tRetry0 = Date.now();
+          let attempt = 0, lastErr = e, ok = false;
+          while (Date.now() - tRetry0 < maxWaitMs) {
+            const wait = waits[Math.min(attempt, waits.length - 1)];
+            attempt++;
+            await show(`⚠️ API unreachable (${msg1.slice(0, 120)})\nRetry ${attempt} in ${wait / 1000}s… (keeping your request, no need to resend)`);
+            await sleep(wait);
+            if (isStale()) break;
+            try {
+              r = await chatStream(messages, activeTools(), null, undefined, attempt < 2, noteThought);
+              lastErr = null; ok = true;
+              dbg(`retry ${attempt} succeeded`);
+              break;
+            } catch (e2) { lastErr = e2; dbg(`retry ${attempt} failed:`, String(e2.message || e2).slice(0, 160)); }
+          }
+          if (!ok || isStale()) {
+            if (isStale()) break;
+            dbg("retry budget exhausted:", String(lastErr?.message || lastErr).slice(0, 200));
+            console.error(`[chat ${chatId}] ❌ API unreachable after ${Math.round((Date.now() - tRetry0) / 1000)}s: ${String(lastErr?.message || lastErr).slice(0, 200)}`);
+            clearInterval(liveTicker);
+            if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
+            await show(`❌ API still unreachable after ${Math.round((Date.now() - tRetry0) / 1000)}s: ${String(lastErr?.message || lastErr).slice(0, 200)}\nYour message is kept - send anything to retry, or try again in a few minutes.`);
+            return;
+          }
         }
       }
     }
     if (isStale()) { dbg("abort after API (superseded)"); break; }
+    noteUsage(sessId, r, messages);
+    llmCalls++;
+    outTokens += Number(r.usage?.completion_tokens) || 0;
     if (!(r.toolCalls || []).length && !(r.content || "").trim()) {
       let recovered = false;
       for (let e = 0; e < 3 && !recovered; e++) {
@@ -1636,6 +1860,7 @@ async function handlePrompt(chatId, userContent, ctx) {
           const r2 = await chatStream(messages, useTools, null, undefined, false, noteThought, { maxTokens: bigger });
           if ((r2.content || "").trim() || (r2.toolCalls || []).length) {
             r = r2; recovered = true;
+            noteUsage(sessId, r2, messages);
             dbg(`recovery ${e + 1} got content len=${(r2.content || "").length} tools=${(r2.toolCalls || []).length}`);
           } else {
             dbg(`recovery ${e + 1} still empty (finish=${r2.finishReason || "?"})`);
@@ -1645,6 +1870,7 @@ async function handlePrompt(chatId, userContent, ctx) {
       }
       if (!recovered && !isStale()) {
         dbg("all empty-recoveries failed - finalizing honestly");
+        console.warn(`[chat ${chatId}] ⚠️ model kept returning empty responses - gave up after ${llmCalls} calls`);
         clearInterval(liveTicker);
         if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
         await finalizeStream(ctx, prog, "⚠️ The model keeps returning an empty response (output/context limit hit). Try a shorter request, or send /new to clear history and retry.");
@@ -1653,6 +1879,7 @@ async function handlePrompt(chatId, userContent, ctx) {
       if (isStale()) { dbg("abort after empty-recovery (superseded)"); break; }
     }
     if (r.toolCalls?.length) {
+      toolCount += r.toolCalls.length;
       dbg(`round ${round}: tools`, r.toolCalls.map((t) => t.function?.name).join(","));
       if (blockedSig) {
         const retry = r.toolCalls.some((tc) => {
@@ -1750,7 +1977,8 @@ async function handlePrompt(chatId, userContent, ctx) {
     } catch (e) {
       console.warn(`[hooks] output transform failed: ${e.message}`);
     }
-    pushHistory(chatId, "assistant", deliver);
+    pushHistory(sessId, "assistant", deliver);
+    console.log(`[chat ${chatId}] ✅ done in ${((Date.now() - t0) / 1000).toFixed(1)}s | llm=${llmCalls} | tools=${toolCount} | out=${outTokens} tok | ctx≈${memoryStore[sessId]?.lastPromptTokens || "?"} tok${sessId !== chatId ? ` | session=${sessId}` : ""}`);
     clearInterval(liveTicker);
     if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
     await finalizeStream(ctx, prog, deliver);
@@ -1760,10 +1988,12 @@ async function handlePrompt(chatId, userContent, ctx) {
   if (activeReq.get(chatId) === mySeq) activeReq.delete(chatId);
   if (isStale()) {
 
-    if (prog) { try { await safeEdit(ctx, prog.chat.id, prog.message_id, "⏭ Skipped - answering your newer message…"); } catch {} }
+    if (prog) { try { await safeEdit(ctx, prog.chat.id, prog.message_id, "⏭ Skipped - a newer message or command took over."); } catch {} }
+    console.log(`[chat ${chatId}] ⏹ superseded after ${((Date.now() - t0) / 1000).toFixed(1)}s (llm=${llmCalls} tools=${toolCount})`);
     dbg("exit stale (superseded, no render)");
     return;
   }
+  console.log(`[chat ${chatId}] ⏹ stopped at round cap (llm=${llmCalls} tools=${toolCount})`);
   await show("(done - stopped)");
 }
 
@@ -1859,7 +2089,11 @@ async function processText(ctx, text, imageUrl) {
       ? [{ type: "text", text: body }, { type: "image_url", image_url: { url: imageUrl } }]
       : body;
     if (config.debugLog) console.log(`msg: chat=${c.id} (${c.type}) from=${f.id} msg=${msg.message_id} text=${String(text).slice(0, 120)}`);
-    await handlePrompt(ctx.chat.id, userContent, ctx);
+    handlePrompt(ctx.chat.id, userContent, ctx).catch((e) => {
+      console.error("handlePrompt failed:", e);
+      ctx.reply(`❌ ${String(e.message || e)}`.slice(0, 1000)).catch(() => {});
+    });
+    return;
   } catch (e) {
     console.error(e);
     ctx.reply(`❌ ${String(e.message || e)}`.slice(0, 1000)).catch(() => {});
@@ -1875,12 +2109,136 @@ Just send me a message - shell, files, websites, images, Telegram tools.
 
 Commands: /new • /model • /id • /chatid • /forget • /btw
 Group triggers: /talk <q> • /t <q> • \`=\` \`~\` \`|\` • @mention • reply-to-me
-Owner: /adduser • /deluser • /users • /apis • /addapi • /delapi • /str • /login • /plugin • /pl`,
+Owner: /adduser • /deluser • /users • /sessions • /apis • /addapi • /delapi • /str • /login • /plugin • /pl`,
     { parse_mode: "Markdown" }
   ).catch((e) => console.warn("start reply failed:", e.message));
 });
-bot.command("new", (ctx) => { conversations.delete(ctx.chat.id); saveHistorySoon(); ctx.reply("🧹 History cleared."); });
-bot.command("forget", (ctx) => { conversations.delete(ctx.chat.id); delete memoryStore[ctx.chat.id]; saveMemory(); saveHistorySoon(); ctx.reply("🧠 Memory + history cleared."); });
+bot.command("new", (ctx) => {
+  const s = activeSessionId(ctx.chat.id);
+  activeReq.delete(ctx.chat.id);
+  conversations.delete(s);
+  saveHistorySoon();
+  ctx.reply(s === ctx.chat.id ? "🧹 History cleared - any running task was stopped." : `🧹 History cleared for attached session ${s} - any running task was stopped.`);
+});
+bot.command("forget", (ctx) => {
+  const s = activeSessionId(ctx.chat.id);
+  activeReq.delete(ctx.chat.id);
+  conversations.delete(s);
+  delete memoryStore[s];
+  saveMemory();
+  saveHistorySoon();
+  ctx.reply(s === ctx.chat.id ? "🧠 Memory + history cleared - any running task was stopped." : `🧠 Memory + history cleared for attached session ${s} - any running task was stopped.`);
+});
+
+function fmtAge(ts) {
+  if (!ts) return "-";
+  const d = Date.now() - ts;
+  if (d < 60000) return `${Math.max(1, Math.floor(d / 1000))}s ago`;
+  if (d < 3600000) return `${Math.floor(d / 60000)}m ago`;
+  if (d < 86400000) return `${Math.floor(d / 3600000)}h ago`;
+  return `${Math.floor(d / 86400000)}d ago`;
+}
+const mdSafe = (s) => String(s || "").replace(/[`*_\[\]]/g, "").slice(0, 60);
+function sessionEntry(idRaw) {
+  const id = Number(idRaw);
+  const e = memoryStore[id] || memoryStore[String(idRaw)] || null;
+  const h = conversations.get(id) || [];
+  return { id, e, h };
+}
+function sessionDetailText(idRaw, ctxChatId) {
+  const { id, e, h } = sessionEntry(idRaw);
+  const tok = h.length ? chatContextTokens(id) : 0;
+  const type = e?.chatType || (id > 0 ? "private" : "group/supergroup");
+  const title = e?.chatTitle ? ` - ${mdSafe(e.chatTitle)}` : "";
+  const marker = id === ctxChatId ? " 👈 current" : "";
+  const head = [
+    `💬 Session \`${id}\` [${type}]${title}${marker}`,
+    `Messages: ${h.length} (~${tok} tokens est. of ${config.contextWindow ?? 131072})`,
+    `First seen: ${e?.firstSeen ? new Date(e.firstSeen).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "-"}`,
+    `Last active: ${fmtAge(e?.updated)}`,
+  ].join("\n");
+  const summary = e?.summary || "(no summary yet - all turns are kept raw until context hits compactAt)";
+  const shared = Object.entries(memoryStore).filter(([k, v]) => Number(k) !== id && v?.attach && activeSessionId(Number(k)) === id).map(([k]) => k);
+  const sharedLine = shared.length ? `\n🔗 Shared with chats: ${shared.join(", ")} (their messages use this session)` : "";
+  return `${head}${sharedLine}\n\n📝 Memory summary:\n${summary}`;
+}
+bot.command("sessions", async (ctx) => {
+  if (!isOwner(ctx)) return ctx.reply("⚠️ Owner only - sessions list memory of every chat the bot has seen.");
+  const raw = (ctx.message?.text || "").replace(/^\/sessions(@\w+)?\s*/i, "").trim();
+  const parts = raw.split(/\s+/).filter(Boolean);
+  const subRaw = (parts[0] || "").toLowerCase();
+  const sub = { "-t": "attach", "-d": "detach" }[subRaw] || subRaw;
+  const usage = "Usage:\n/sessions - list all chat sessions\n/sessions <chat_id> - details + memory summary\n/sessions new <chat_id> - clear turns, keep summary\n/sessions rm <chat_id> - delete turns + summary\n/sessions attach <chat_id> (alias -t) - share that session's memory + history here\n/sessions detach (alias -d) - back to this chat's own session";
+  if (!sub) {
+    const rows = Object.entries(memoryStore).map(([id, e]) => ({ id, e, h: conversations.get(Number(id)) || [] }))
+      .sort((a, b) => (b.e?.updated || 0) - (a.e?.updated || 0));
+    if (!rows.length) return ctx.reply("💬 No sessions yet - say something in any chat first.");
+    const lines = rows.map(({ id, e, h }) => {
+      const tok = h.length ? chatContextTokens(Number(id)) : 0;
+      const title = e?.chatTitle ? ` "${mdSafe(e.chatTitle)}"` : "";
+      const mark = Number(id) === ctx.chat.id ? " 👈" : "";
+      const att = e?.attach ? ` 🔗→${activeSessionId(Number(id))}` : "";
+      const sum = e?.summary ? ", 📝 summary" : "";
+      return `• \`${id}\` [${e?.chatType || "?"}]${title} - ${h.length} msgs, ~${tok} tok${sum}, ${fmtAge(e?.updated)}${mark}${att}`;
+    });
+    for (const chunk of splitTG(`💬 Sessions (${rows.length}):\n${lines.join("\n")}\n\n${usage}`, 4000)) {
+      try { await ctx.reply(chunk, { parse_mode: "Markdown" }); } catch { await ctx.reply(chunk); }
+    }
+    return;
+  }
+  if (/^-?\d+$/.test(sub)) {
+    const { e, h } = sessionEntry(sub);
+    if (!e && !h.length) return ctx.reply(`⚠️ No session \`${sub}\` (no messages/memory stored).`, { parse_mode: "Markdown" });
+    for (const chunk of splitTG(sessionDetailText(sub, ctx.chat.id), 4000)) {
+      try { await ctx.reply(chunk, { parse_mode: "Markdown" }); } catch { await ctx.reply(chunk); }
+    }
+    return;
+  }
+  if (sub === "attach") {
+    const idRaw = parts[1];
+    if (!idRaw || !/^-?\d+$/.test(idRaw)) return ctx.reply("⚠️ Usage: /sessions attach <chat_id>");
+    const target = Number(idRaw);
+    if (target === ctx.chat.id) return ctx.reply("⚠️ That is this chat itself - nothing to attach.");
+    const { e, h } = sessionEntry(idRaw);
+    if (!e && !h.length) return ctx.reply(`⚠️ No session \`${idRaw}\` yet - it needs messages/memory first.`, { parse_mode: "Markdown" });
+    const root = activeSessionId(target);
+    if (root === ctx.chat.id) return ctx.reply("⚠️ That would create a loop - this chat is part of that chain.");
+    const me = memoryStore[ctx.chat.id] || (memoryStore[ctx.chat.id] = { firstSeen: Date.now() });
+    me.attach = root;
+    saveMemory();
+    return ctx.reply(`🔗 Attached - this chat now shares session \`${root}\` (existing turns + memory). New messages here land in that session. /sessions detach to unlink.`, { parse_mode: "Markdown" });
+  }
+  if (sub === "detach") {
+    const idRaw = parts[1];
+    const target = idRaw && /^-?\d+$/.test(idRaw) ? Number(idRaw) : ctx.chat.id;
+    const me = memoryStore[target];
+    if (!me || !me.attach) return ctx.reply(`⚠️ Chat \`${target}\` is not attached to any session.`, { parse_mode: "Markdown" });
+    delete me.attach;
+    saveMemory();
+    return ctx.reply(`✂️ Detached \`${target}\` - back to its own session.`, { parse_mode: "Markdown" });
+  }
+  const idRaw = parts[1];
+  if (!idRaw || !/^-?\d+$/.test(idRaw) || !["new", "rm", "del", "delete"].includes(sub)) return ctx.reply("⚠️ " + usage);
+  const id = Number(idRaw);
+  const { e, h } = sessionEntry(idRaw);
+  if (!e && !h.length) return ctx.reply(`⚠️ No session \`${idRaw}\`.`);
+  if (sub === "new") {
+    conversations.delete(id);
+    if (id === activeSessionId(ctx.chat.id)) activeReq.delete(ctx.chat.id);
+    saveHistorySoon();
+    return ctx.reply(`🧹 Session \`${id}\` turns cleared (summary kept).`, { parse_mode: "Markdown" });
+  }
+  const linked = Object.entries(memoryStore).filter(([k, v]) => Number(k) !== id && v?.attach && activeSessionId(Number(k)) === id).map(([k]) => k);
+  for (const k of linked) delete memoryStore[k].attach;
+  if (id === activeSessionId(ctx.chat.id)) activeReq.delete(ctx.chat.id);
+  for (const k of linked) if (Number(k) === ctx.chat.id) activeReq.delete(ctx.chat.id);
+  conversations.delete(id);
+  delete memoryStore[id];
+  saveMemory();
+  saveHistorySoon();
+  const warn = linked.length ? `\n✂️ Detached: ${linked.join(", ")} - they are back to their own fresh sessions.` : "";
+  return ctx.reply(`🗑 Session \`${id}\` deleted (turns + summary).${warn}`, { parse_mode: "Markdown" });
+});
 
 
 const MODELS_CACHE_PATH = path.join(__dirname, "models_cache.json");
@@ -3154,6 +3512,292 @@ bot.on("channel_post", async (ctx) => {
 bot.on("migrate_to_chat_id", (ctx) => ctx.reply("⚠️ This group upgraded to a supergroup - history was reset.").catch(() => {}));
 
 
+function createConsole(api) {
+  const C = { chatId: 0, rl: null };
+  const stdTty = () => !!process.stdout.isTTY;
+  const inTty = () => !!process.stdin.isTTY;
+  const cols = () => Math.max(30, (process.stdout.columns || 100) - 1);
+  const clearLine = () => {
+    if (!stdTty()) return;
+    if (api.readline.clearLine && api.readline.cursorTo) { api.readline.clearLine(process.stdout, 0); api.readline.cursorTo(process.stdout, 0); }
+    else process.stdout.write("\r\u001b[K");
+  };
+  const out = (...a) => { clearLine(); console.log(...a); };
+  const anim = { ref: 0, timer: null, t0: 0, frame: 0, text: "", thought: "" };
+  const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const drawAnim = () => {
+    if (!stdTty()) return;
+    const el = Math.floor((Date.now() - anim.t0) / 1000);
+    const spin = SPIN[anim.frame % SPIN.length];
+    const raw = anim.thought ? anim.thought : anim.text.replace(/^> - /, "");
+    const line = `${spin} ${el}s ${raw.replace(/\s+/g, " ")}`.slice(0, cols());
+    clearLine();
+    process.stdout.write(line);
+  };
+  const startAnim = () => {
+    anim.ref++;
+    if (anim.timer || !stdTty()) return;
+    anim.t0 = Date.now(); anim.frame = 0; anim.text = ""; anim.thought = "";
+    anim.timer = setInterval(() => { anim.frame++; drawAnim(); }, 120);
+    anim.timer.unref?.();
+  };
+  const stopAnim = () => {
+    anim.ref = Math.max(0, anim.ref - 1);
+    if (anim.ref || !anim.timer) return;
+    clearInterval(anim.timer); anim.timer = null;
+    clearLine();
+  };
+  const prog = (t) => {
+    anim.text = String(t == null ? "" : t);
+    if (anim.timer || !stdTty()) return;
+    clearLine();
+    process.stdout.write(anim.text.replace(/\s+/g, " ").slice(0, cols()));
+  };
+  const onProgress = (p) => {
+    if (!p) return;
+    if (typeof p.thought === "string") anim.thought = p.thought;
+    if (typeof p.text === "string") prog(p.text);
+  };
+  const print = (t) => {
+    const s = String(t == null ? "" : t);
+    if (s.startsWith("> -")) prog(s); else out(s);
+    return Promise.resolve({ chat: { id: C.chatId }, message_id: 0 });
+  };
+  const cliCtx = () => {
+    const tg = Object.create(api.bot.telegram);
+    tg.editMessageText = async (_chatId, _msgId, _inline, text) => { await print(text); return true; };
+    return {
+      chat: { id: C.chatId, type: "private", title: "CLI console" },
+      from: { id: api.config.ownerUserId, username: "cli", first_name: "CLI" },
+      message: { message_id: 0, text: "" },
+      reply: (t) => print(t),
+      telegram: tg,
+      __onProgress: onProgress,
+    };
+  };
+  const prompt = () => { if (!C.rl || !inTty()) return; C.rl.setPrompt(`bot${C.chatId ? `(${C.chatId})` : ""}> `); C.rl.prompt(); };
+  const showVal = (v) => {
+    if (v === undefined) return "undefined";
+    if (typeof v === "string") return v;
+    try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+  };
+  const HELP = [
+    "🖥  Admin console - bare text talks to the AI, everything else is a command:",
+    "  chat <text>             ask the AI (active session) - same as typing text",
+    "  use <chat_id> | use off  pick which session the console chats with (default: console-only session 0)",
+    "  say <chat_id> <text>     send a Telegram message as the bot (no AI)",
+    "  sessions | session <id>  list sessions / show one (summary + shared chats)",
+    "  new [id] | forget [id]   clear turns (keep summary) / clear memory + turns",
+    "  rm <id>                  delete a session (turns + summary)",
+    "  model [<id>]             show provider/model or switch model",
+    "  apis                     list API endpoints",
+    "  plugins [reload]         list plugins / hot-reload from disk",
+    "  tool <name> <json>       run any bot tool directly",
+    "  sh <command>             run a shell command",
+    "  debug [on|off]           toggle debug logging",
+    "  eval <js>                evaluate JS inside the bot process",
+    "  status                   uptime / memory / runs / sessions",
+    "  stop | exit | quit       save & shut the bot down",
+  ].join("\n");
+
+  async function run(line) {
+    const sp = line.indexOf(" ");
+    const verb = (sp === -1 ? line : line.slice(0, sp)).toLowerCase();
+    const arg = sp === -1 ? "" : line.slice(sp + 1).trim();
+    const p = api.currentProvider();
+    switch (verb) {
+      case "help": out(HELP); return;
+      case "status": {
+        const mem = process.memoryUsage();
+        const up = Math.floor(process.uptime());
+        const runs = [...api.activeReq.keys()];
+        out(`🤖 ${api.botUsername() ? "@" + api.botUsername() : "(bot)"} | provider=${p} model=${api.currentChatModel()}`);
+        out(`   uptime ${Math.floor(up / 3600)}h ${Math.floor((up % 3600) / 60)}m | pid ${process.pid} | rss ${(mem.rss / 1048576).toFixed(0)}MB | node ${process.version}`);
+        out(`   sessions=${Object.keys(api.memoryStore).length} | active runs=${runs.length}${runs.length ? ` [${runs.join(", ")}]` : ""} | debugLog=${!!api.config.debugLog} | console session=${C.chatId}`);
+        return;
+      }
+      case "chat": case "ask": {
+        if (!arg) { out("usage: chat <text>  (or just type text)"); return; }
+        out(`👤 ${arg}`);
+        startAnim();
+        try { await api.handlePrompt(C.chatId, arg, cliCtx()); }
+        catch (e) { out(`❌ ${e?.message || e}`); }
+        finally { stopAnim(); }
+        return;
+      }
+      case "use": {
+        if (!arg) { out(`console session: ${C.chatId}${C.chatId ? ` (${api.memoryStore[C.chatId]?.chatTitle || "?"})` : " (console-only)"}`); return; }
+        if (arg === "off") { C.chatId = 0; out("console session reset to 0"); return; }
+        if (!/^-?\d+$/.test(arg)) { out("usage: use <chat_id> | use off"); return; }
+        C.chatId = Number(arg);
+        const e = api.memoryStore[C.chatId];
+        out(`console session → ${C.chatId}${e?.chatTitle ? ` "${e.chatTitle}"` : ""}${e?.attach ? ` (attached → ${api.activeSessionId(C.chatId)})` : ""}`);
+        return;
+      }
+      case "say": case "send": {
+        const m = arg.match(/^(-?\d+)\s+([\s\S]+)$/);
+        if (!m) { out("usage: say <chat_id> <text>"); return; }
+        const chunks = api.splitTG(m[2]);
+        for (const chunk of chunks) await api.bot.telegram.sendMessage(Number(m[1]), chunk);
+        const e = api.memoryStore[Number(m[1])];
+        out(`✉️ sent ${chunks.length} message(s) to ${m[1]}${e?.chatTitle ? ` "${String(e.chatTitle).slice(0, 40)}"` : ""} (${m[2].length} chars)`);
+        return;
+      }
+      case "sessions": {
+        const rows = Object.entries(api.memoryStore).map(([id, e]) => ({ id, e, h: api.conversations.get(Number(id)) || [] }))
+          .sort((a, b) => (b.e?.updated || 0) - (a.e?.updated || 0));
+        if (!rows.length) { out("(no sessions yet)"); return; }
+        for (const { id, e, h } of rows) {
+          const tok = h.length ? api.chatContextTokens(Number(id)) : 0;
+          const title = e?.chatTitle ? ` "${String(e.chatTitle).slice(0, 40)}"` : "";
+          const mark = Number(id) === C.chatId ? " 👈 console" : "";
+          const att = e?.attach ? ` 🔗→${api.activeSessionId(Number(id))}` : "";
+          const sum = e?.summary ? ", 📝 summary" : "";
+          out(`  • ${id} [${e?.chatType || "?"}]${title} - ${h.length} msgs, ~${tok} tok${sum}, ${api.fmtAge(e?.updated)}${mark}${att}`);
+        }
+        return;
+      }
+      case "session": {
+        if (!/^-?\d+$/.test(arg)) { out("usage: session <chat_id>"); return; }
+        out(api.sessionDetailText(arg, C.chatId));
+        return;
+      }
+      case "new": {
+        const id = arg ? Number(arg) : C.chatId;
+        if (!/^-?\d+$/.test(arg || String(C.chatId))) { out("usage: new [chat_id]"); return; }
+        api.conversations.delete(id);
+        api.activeReq.delete(id);
+        if (api.activeSessionId(C.chatId) === id) api.activeReq.delete(C.chatId);
+        api.saveHistorySoon();
+        out(`🧹 session ${id} turns cleared (summary kept), running task aborted`);
+        return;
+      }
+      case "forget": {
+        const id = arg ? Number(arg) : C.chatId;
+        if (!/^-?\d+$/.test(arg || String(C.chatId))) { out("usage: forget [chat_id]"); return; }
+        api.conversations.delete(id);
+        api.activeReq.delete(id);
+        if (api.activeSessionId(C.chatId) === id) api.activeReq.delete(C.chatId);
+        delete api.memoryStore[id];
+        api.saveMemory();
+        api.saveHistorySoon();
+        out(`🧠 session ${id} memory + turns cleared, running task aborted`);
+        return;
+      }
+      case "rm": case "del": {
+        if (!/^-?\d+$/.test(arg)) { out("usage: rm <chat_id>"); return; }
+        const id = Number(arg);
+        const linked = Object.entries(api.memoryStore).filter(([k, v]) => Number(k) !== id && v?.attach && api.activeSessionId(Number(k)) === id).map(([k]) => k);
+        for (const k of linked) delete api.memoryStore[k].attach;
+        api.conversations.delete(id);
+        delete api.memoryStore[id];
+        api.activeReq.delete(id);
+        if (C.chatId === id) C.chatId = 0;
+        api.saveMemory();
+        api.saveHistorySoon();
+        out(`🗑 session ${id} deleted${linked.length ? ` (detached: ${linked.join(", ")})` : ""}`);
+        return;
+      }
+      case "model": {
+        if (!arg) { out(`provider=${p} model=${api.currentChatModel()}`); return; }
+        if (p === "antigravity") api.config.auth.antigravity.model = arg;
+        else if (p === "chatgpt") api.config.auth.chatgpt.model = arg;
+        else api.config.model = arg;
+        api.saveConfig();
+        out(`model → ${arg} (provider ${p})`);
+        return;
+      }
+      case "apis": {
+        const pool = api.getApiPool();
+        if (!pool.length) { out("(no API endpoints configured)"); return; }
+        pool.forEach((a, i) => out(`  [${i}] ${a.baseURL}  key=${api.maskKey(a.apiKey)}`));
+        return;
+      }
+      case "plugins": case "pl": {
+        if (arg === "reload") {
+          const r = api.plugins.reloadAll(api.bot, api.config, api.pluginApiExtras());
+          out(`📦 plugins reloaded: ok=${r?.ok ?? "?"} fail=${r?.fail ?? "?"} total=${r?.total ?? "?"}`);
+          return;
+        }
+        const list = api.plugins.listPlugins();
+        if (!list.length) { out("(no plugins installed)"); return; }
+        for (const pl of list) out(`  • ${pl.id || pl.name}${pl.enabled ? " ✅" : " ⛔"}${pl.error ? ` (${pl.error})` : ""}`);
+        return;
+      }
+      case "tool": {
+        const t = arg.match(/^(\S+)\s*([\s\S]*)$/);
+        if (!t) { out('usage: tool <name> <json>   e.g. tool get_time {}'); return; }
+        let args = {};
+        if (t[2].trim()) { try { args = JSON.parse(t[2]); } catch { out(`⚠️ args must be JSON: tool ${t[1]} {"key":"value"}`); return; } }
+        startAnim();
+        let res;
+        try { res = await api.runTool(t[1], args, cliCtx()); }
+        finally { stopAnim(); }
+        out(showVal(res));
+        return;
+      }
+      case "sh": {
+        if (!arg) { out("usage: sh <command>"); return; }
+        startAnim();
+        let res;
+        try { res = await api.runTool("shell_exec", { command: arg, timeoutSec: 120 }, cliCtx()); }
+        finally { stopAnim(); }
+        out(showVal(res));
+        return;
+      }
+      case "debug": {
+        const v = arg.toLowerCase();
+        if (v === "on") api.config.debugLog = true;
+        else if (v === "off") api.config.debugLog = false;
+        else if (!arg) api.config.debugLog = !api.config.debugLog;
+        else { out("usage: debug [on|off]"); return; }
+        api.saveConfig();
+        out(`debugLog = ${!!api.config.debugLog}`);
+        return;
+      }
+      case "eval": {
+        if (!arg) { out("usage: eval <js expression>"); return; }
+        let v = eval(arg);
+        if (v && typeof v.then === "function") v = await v;
+        out(showVal(v));
+        return;
+      }
+      case "stop": case "exit": case "quit": {
+        out("💾 saving and shutting down…");
+        try { api.saveHistory(); } catch {}
+        try { api.bot.stop("console"); } catch {}
+        setTimeout(() => process.exit(0), 400).unref?.();
+        return;
+      }
+      default:
+        out(`👤 ${line}`);
+        startAnim();
+        try { await api.handlePrompt(C.chatId, line, cliCtx()); }
+        catch (e) { out(`❌ ${e?.message || e}`); }
+        finally { stopAnim(); }
+        return;
+    }
+  }
+
+  function start() {
+    if (C.rl) return C.rl;
+    const rl = api.readline.createInterface({ input: process.stdin, output: process.stdout, terminal: inTty() });
+    C.rl = rl;
+    if (inTty()) console.log("\n🖥  Admin console ready - `help` for commands, bare text chats with the AI.\n");
+    prompt();
+    rl.on("line", async (raw) => {
+      const line = String(raw || "").trim();
+      if (!line) { prompt(); return; }
+      try { await run(line); } catch (e) { console.error(`[cli] ${e?.stack || e?.message || e}`); }
+      prompt();
+    });
+    rl.on("close", () => {});
+    rl.on("error", () => {});
+    return rl;
+  }
+  return { start, run, state: C };
+}
+
 const BOOT_DELAYS = [2000, 5000, 10000, 30000, 60000];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let fatalCount = 0;
@@ -3178,6 +3822,15 @@ process.on("uncaughtException", (e) => {
   setTimeout(() => process.exit(1), 500).unref?.();
 });
 bot.catch((e) => noteFatal("telegraf error (kept alive)", e));
+
+
+const CONSOLE = createConsole({
+  bot, config, saveConfig, handlePrompt, runTool, plugins, pluginApiExtras,
+  activeReq, memoryStore, conversations, saveMemory, saveHistory, saveHistorySoon,
+  activeSessionId, fmtAge, sessionEntry, sessionDetailText, currentProvider, currentChatModel,
+  getApiPool, maskKey, splitTG, chatContextTokens, readline, botUsername: () => BOT_USERNAME,
+});
+CONSOLE.start();
 
 (async () => {
   let attempt = 0;
